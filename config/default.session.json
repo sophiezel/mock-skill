@@ -1,0 +1,33 @@
+{
+  "proxy": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 18999,
+    "missPolicy": "passthrough",
+    "blockWritePassthrough": true,
+    "injectCaseHeader": "x-mock-case",
+    "recordMisses": true,
+    "passthroughHosts": []
+  },
+  "mock": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 3900
+  },
+  "browser": {
+    "autoLaunch": true,
+    "startUrl": "",
+    "proxyArg": true,
+    "trafficGateSeconds": 30
+  },
+  "cors": {
+    "allowLocalhost": true,
+    "extraOrigins": [],
+    "allowCredentials": true
+  },
+  "cases": {
+    "default": "success",
+    "active": {}
+  },
+  "captureMode": "soft"
+}
