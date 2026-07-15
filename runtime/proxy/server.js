@@ -122,8 +122,15 @@ function startProxyServer(opts) {
         : Buffer.alloc(0);
 
       if (isPassthroughHost(hostname)) {
-        await forwardUpstream(req, res, target, body, cors, true);
+        const up = await forwardUpstream(req, res, target, body, cors, true);
         logAccess({ action: 'passthrough-host', method, url: target.href });
+        recordCapture({
+          host: hostname,
+          path: urlPath,
+          method,
+          reason: 'passthrough-host',
+          responseBody: up?.bodyJson ?? up?.bodyText,
+        });
         return;
       }
 
@@ -205,7 +212,7 @@ function startProxyServer(opts) {
         return;
       }
 
-      await forwardUpstream(req, res, target, body, cors, true);
+      const up = await forwardUpstream(req, res, target, body, cors, true);
       logAccess({ action: 'passthrough', method, url: target.href });
       recordCapture({
         host: hostname,
@@ -213,6 +220,7 @@ function startProxyServer(opts) {
         method,
         query: Object.fromEntries(target.searchParams),
         reason: 'miss',
+        responseBody: up?.bodyJson ?? up?.bodyText,
       });
     } catch (err) {
       applyCorsHeaders(req, res, cors);
@@ -263,16 +271,28 @@ function startProxyServer(opts) {
         (upRes) => {
           if (injectCors) applyCorsHeaders(clientReq, clientRes, corsCfg);
           const outHeaders = { ...upRes.headers };
-          clientRes.writeHead(upRes.statusCode || 200, outHeaders);
-          upRes.pipe(clientRes);
-          upRes.on('end', resolve);
+          const chunks = [];
+          upRes.on('data', (c) => chunks.push(c));
+          upRes.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            const bodyText = buf.toString('utf8');
+            let bodyJson;
+            try {
+              bodyJson = JSON.parse(bodyText);
+            } catch {
+              bodyJson = undefined;
+            }
+            clientRes.writeHead(upRes.statusCode || 200, outHeaders);
+            clientRes.end(buf);
+            resolve({ status: upRes.statusCode, bodyText, bodyJson });
+          });
         },
       );
       upstream.on('error', (e) => {
         if (injectCors) applyCorsHeaders(clientReq, clientRes, corsCfg);
         clientRes.statusCode = 502;
         clientRes.end(JSON.stringify({ code: 502, message: e.message }));
-        resolve();
+        resolve({ error: e.message });
       });
       if (body.length) upstream.write(body);
       upstream.end();

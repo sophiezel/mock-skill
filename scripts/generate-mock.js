@@ -8,15 +8,27 @@ const {
   contractPath,
   mockHandlerPath,
   apiKey,
+  pathDepth,
 } = require('../lib/paths');
 const { appendAudit } = require('../lib/audit');
+const {
+  materialize,
+  shapeToDataFields,
+  buildEnumCases,
+} = require('../lib/materialize');
 
-function buildDataFields(hints = []) {
-  const fields = {};
-  for (const h of hints) {
-    fields[h] = { type: 'unknown', note: 'inferred from usage' };
+function hintListToObject(hints) {
+  if (!hints) return {};
+  if (Array.isArray(hints)) {
+    return Object.fromEntries(
+      hints.map((k) =>
+        typeof k === 'string'
+          ? [k, { type: 'string', required: false, enums: [] }]
+          : [k, k],
+      ),
+    );
   }
-  return fields;
+  return hints;
 }
 
 function buildContract(roleEntry, { taskId, source, resolution }) {
@@ -28,6 +40,54 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
     at: now,
     action: roleEntry.hasMock ? 'update' : 'create',
   };
+
+  const shape =
+    roleEntry.responseShape ||
+    ({
+      type: 'object',
+      props: Object.fromEntries(
+        (roleEntry.responseHints || []).map((h) => [h, { type: 'unknown' }]),
+      ),
+    });
+
+  const dataSample = materialize(shape);
+  const hasData =
+    dataSample &&
+    typeof dataSample === 'object' &&
+    (Array.isArray(dataSample)
+      ? dataSample.length > 0
+      : Object.keys(dataSample).length > 0);
+
+  const enumCases = buildEnumCases(shape, dataSample);
+  const coverage = roleEntry.coverage || {
+    request: { keysFound: [], confidence: 'low' },
+    response: { pathsFound: [], confidence: 'low' },
+    enums: [],
+    gaps: ['unknown'],
+  };
+
+  const cases = [
+    {
+      id: 'success',
+      when: {},
+      response: { code: 0, data: dataSample, message: '' },
+    },
+    {
+      id: 'empty',
+      when: { header: { 'x-mock-case': 'empty' } },
+      response: {
+        code: 0,
+        data: Array.isArray(dataSample) ? [] : {},
+        message: '',
+      },
+    },
+    {
+      id: 'biz_error',
+      when: { header: { 'x-mock-case': 'biz_error' } },
+      response: { code: 50000, data: null, message: 'mock business error' },
+    },
+    ...enumCases,
+  ];
 
   return {
     id,
@@ -42,52 +102,27 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
     history: [historyEntry],
     resolution: resolution || null,
     request: {
-      query: Object.fromEntries(
-        (roleEntry.queryHints || []).map((k) => [
-          k,
-          { type: 'string', required: false, enums: [] },
-        ]),
+      query: hintListToObject(
+        roleEntry.queryHints?.length
+          ? roleEntry.queryHints
+          : coverage.request?.keysFound || [],
       ),
-      body: Object.fromEntries(
-        (roleEntry.bodyHints || []).map((k) => [
-          k,
-          { type: 'unknown', required: false },
-        ]),
-      ),
+      body: hintListToObject(roleEntry.bodyHints || []),
       headers: [],
     },
     response: {
       envelope: { code: 'number', data: 'object|null', message: 'string' },
       successCode: 0,
-      dataFields: buildDataFields(roleEntry.responseHints),
+      dataFields: shapeToDataFields(shape),
       bizCodes: [],
+      source: hasData ? 'usage' : 'empty',
+      shape,
     },
-    cases: [
-      {
-        id: 'success',
-        when: {},
-        response: { code: 0, data: sampleData(roleEntry.responseHints), message: '' },
-      },
-      {
-        id: 'empty',
-        when: { header: { 'x-mock-case': 'empty' } },
-        response: { code: 0, data: Array.isArray(roleEntry.responseHints) ? [] : {}, message: '' },
-      },
-      {
-        id: 'biz_error',
-        when: { header: { 'x-mock-case': 'biz_error' } },
-        response: { code: 50000, data: null, message: 'mock business error' },
-      },
-    ],
+    cases,
+    coverage,
     evidences: roleEntry.evidences || [],
+    exportHint: roleEntry.exportHint || null,
   };
-}
-
-function sampleData(hints = []) {
-  if (!hints.length) return {};
-  const o = {};
-  for (const h of hints) o[h] = null;
-  return o;
 }
 
 function renderHandler(contract) {
@@ -109,7 +144,27 @@ module.exports = ({ method, query, params, body, headers, caseId }) => {
 }
 
 function mergeContract(existing, next, { taskId }) {
-  const history = [...(existing.history || []), ...(next.history || [])].slice(-50);
+  const history = [...(existing.history || []), ...(next.history || [])].slice(
+    -50,
+  );
+  // Prefer richer data sample
+  const nextData = next.cases?.find((c) => c.id === 'success')?.response?.data;
+  const prevData = existing.cases?.find((c) => c.id === 'success')?.response
+    ?.data;
+  const nextRich =
+    nextData &&
+    typeof nextData === 'object' &&
+    Object.keys(nextData).length > 0;
+  const prevRich =
+    prevData &&
+    typeof prevData === 'object' &&
+    Object.keys(prevData).length > 0;
+
+  const cases =
+    nextRich || !prevRich
+      ? next.cases
+      : mergeCasesPreserve(existing.cases, next.cases);
+
   return {
     ...existing,
     ...next,
@@ -127,15 +182,31 @@ function mergeContract(existing, next, { taskId }) {
         ...(existing.response?.dataFields || {}),
         ...(next.response?.dataFields || {}),
       },
-      bizCodes: next.response?.bizCodes?.length
-        ? next.response.bizCodes
-        : existing.response?.bizCodes || [],
+      shape: nextRich
+        ? next.response?.shape
+        : existing.response?.shape || next.response?.shape,
     },
-    cases: next.cases?.length ? next.cases : existing.cases,
+    cases,
+    coverage: next.coverage || existing.coverage,
     evidences: [
       ...new Set([...(existing.evidences || []), ...(next.evidences || [])]),
     ],
   };
+}
+
+function mergeCasesPreserve(prev = [], next = []) {
+  const map = new Map(prev.map((c) => [c.id, c]));
+  for (const c of next) {
+    if (!map.has(c.id) || c.id !== 'success') map.set(c.id, c);
+    else if (
+      c.id === 'success' &&
+      Object.keys(c.response?.data || {}).length >
+        Object.keys(map.get('success').response?.data || {}).length
+    ) {
+      map.set(c.id, c);
+    }
+  }
+  return [...map.values()];
 }
 
 function loadExistingContracts(projectSlug) {
@@ -159,11 +230,11 @@ function listExistingMockKeys(projectSlug) {
   const keys = new Set();
   if (!fs.existsSync(mocksRoot)) return keys;
 
-  function walk(dir, host, parts) {
+  function walkDir(dir, host, parts) {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, ent.name);
       if (ent.isDirectory()) {
-        walk(full, host, [...parts, ent.name]);
+        walkDir(full, host, [...parts, ent.name]);
       } else if (ent.name === 'index.js') {
         const p = '/' + parts.join('/');
         keys.add(`GET ${host}${p}`);
@@ -174,15 +245,70 @@ function listExistingMockKeys(projectSlug) {
 
   for (const hostEnt of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
     if (!hostEnt.isDirectory()) continue;
-    walk(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
+    walkDir(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
   }
   return keys;
 }
 
-/**
- * Generate contracts + handlers.
- * @returns {{ generated: number, skipped: number, blocked: string[], reused: number }}
- */
+/** Remove gateway-only mocks (path depth <= 1) left by old infer */
+function cleanupGatewayOnlyMocks(projectSlug) {
+  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
+  const contractsDir = path.join(projectDataDir(projectSlug), 'contracts');
+  let removed = 0;
+  if (!fs.existsSync(mocksRoot)) return removed;
+
+  function rmHandler(host, parts) {
+    const p = '/' + parts.join('/');
+    if (pathDepth(p) > 1) return;
+    const handler = path.join(mocksRoot, host, ...parts, 'index.js');
+    if (fs.existsSync(handler)) {
+      fs.unlinkSync(handler);
+      removed++;
+      // remove empty dirs
+      try {
+        fs.rmdirSync(path.join(mocksRoot, host, ...parts));
+      } catch {
+        /* ignore */
+      }
+    }
+    // remove matching contracts
+    if (fs.existsSync(contractsDir)) {
+      for (const f of fs.readdirSync(contractsDir)) {
+        if (!f.endsWith('.json')) continue;
+        try {
+          const c = JSON.parse(
+            fs.readFileSync(path.join(contractsDir, f), 'utf8'),
+          );
+          if (c.host === host && c.path === p && pathDepth(p) <= 1) {
+            fs.unlinkSync(path.join(contractsDir, f));
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  function walkDir(dir, host, parts) {
+    if (!fs.existsSync(dir)) return;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walkDir(full, host, [...parts, ent.name]);
+        // after children, if this is depth-1 leaf with index already removed
+      } else if (ent.name === 'index.js') {
+        rmHandler(host, parts);
+      }
+    }
+  }
+
+  for (const hostEnt of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
+    if (!hostEnt.isDirectory()) continue;
+    walkDir(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
+  }
+  return removed;
+}
+
 function generateMocks({
   projectSlug,
   roles,
@@ -192,6 +318,8 @@ function generateMocks({
   merge = true,
 }) {
   ensureProjectDirs(projectSlug);
+  const removedGateway = cleanupGatewayOnlyMocks(projectSlug);
+
   const conflictKeys = new Set(
     conflicts.filter((c) => !c.resolution).map((c) => c.apiKey),
   );
@@ -199,35 +327,29 @@ function generateMocks({
   let generated = 0;
   let skipped = 0;
   let reused = 0;
+  let usageBackedCount = 0;
+  let emptyDataCount = 0;
+  let enumBackedCount = 0;
+  const gapApis = [];
   const blocked = [];
-
   const rules = [];
 
-  for (const roleEntry of roles) {
+  // Skip roles that are still gateway-only
+  const filteredRoles = roles.filter((r) => {
+    const p = r.path || '';
+    return pathDepth(p) > 1;
+  });
+
+  for (const roleEntry of filteredRoles) {
     const key = apiKey(roleEntry);
 
     if (roleEntry.role === 'new' && roleEntry.blocked) {
       blocked.push(key);
-      appendAudit(projectSlug, {
-        command: 'generate',
-        taskId,
-        apiKey: key,
-        role: 'new',
-        summary: 'blocked: missing docs/IO definition',
-      });
       skipped++;
       continue;
     }
-
     if (conflictKeys.has(key) && !force) {
       skipped++;
-      appendAudit(projectSlug, {
-        command: 'generate',
-        taskId,
-        apiKey: key,
-        role: roleEntry.role,
-        summary: 'skipped: unresolved conflict',
-      });
       continue;
     }
 
@@ -243,34 +365,30 @@ function generateMocks({
       hasHandler &&
       !force
     ) {
-      reused++;
-      const cPath = contractPath(projectSlug, key);
-      if (fs.existsSync(cPath)) {
-        const cur = JSON.parse(fs.readFileSync(cPath, 'utf8'));
-        cur.lastTaskId = taskId || cur.lastTaskId;
-        cur.history = [
-          ...(cur.history || []),
-          {
-            taskId,
-            role: roleEntry.role,
-            at: new Date().toISOString(),
-            action: 'reuse',
-          },
-        ].slice(-50);
-        fs.writeFileSync(cPath, `${JSON.stringify(cur, null, 2)}\n`);
+      // Still refresh contract IO if usage-backed is richer
+      let contract = buildContract(roleEntry, {
+        taskId,
+        source: 'usage',
+      });
+      if (merge && existing.has(key)) {
+        contract = mergeContract(existing.get(key), contract, { taskId });
       }
+      fs.writeFileSync(
+        contractPath(projectSlug, key),
+        `${JSON.stringify(contract, null, 2)}\n`,
+      );
+      if (contract.response?.source === 'usage') usageBackedCount++;
+      else emptyDataCount++;
+      if (contract.coverage?.enums?.length) enumBackedCount++;
+      if (contract.coverage?.gaps?.length) {
+        gapApis.push({ id: key, gaps: contract.coverage.gaps });
+      }
+      reused++;
       rules.push({
         id: key,
         host: roleEntry.host === '_default' ? '*' : roleEntry.host,
         pathPrefix: roleEntry.path,
         methods: [roleEntry.method || 'GET'],
-      });
-      appendAudit(projectSlug, {
-        command: 'generate',
-        taskId,
-        apiKey: key,
-        role: roleEntry.role,
-        summary: 'reused existing mock',
       });
       continue;
     }
@@ -283,22 +401,21 @@ function generateMocks({
       contract = mergeContract(existing.get(key), contract, { taskId });
     }
 
+    if (contract.response?.source === 'usage') usageBackedCount++;
+    else emptyDataCount++;
+    if (contract.coverage?.enums?.length) enumBackedCount++;
+    if (contract.coverage?.gaps?.length) {
+      gapApis.push({ id: key, gaps: contract.coverage.gaps });
+    }
+
     const cPath = contractPath(projectSlug, key);
     fs.mkdirSync(path.dirname(cPath), { recursive: true });
     fs.writeFileSync(cPath, `${JSON.stringify(contract, null, 2)}\n`);
 
     if (hasHandler && merge && !force && roleEntry.role === 'modify') {
-      // keep handler body, only refresh if force — still write if no MANUAL marker
       const prev = fs.readFileSync(handlerFile, 'utf8');
       if (prev.includes('mock-skill:manual')) {
         skipped++;
-        appendAudit(projectSlug, {
-          command: 'generate',
-          taskId,
-          apiKey: key,
-          role: roleEntry.role,
-          summary: 'skipped handler: manual marker',
-        });
       } else {
         fs.writeFileSync(handlerFile, renderHandler(contract));
         generated++;
@@ -328,7 +445,19 @@ function generateMocks({
   const rulesPath = path.join(projectDataDir(projectSlug), 'proxy-rules.json');
   fs.writeFileSync(rulesPath, `${JSON.stringify(rules, null, 2)}\n`);
 
-  return { generated, skipped, blocked, reused, rulesPath };
+  return {
+    generated,
+    skipped,
+    blocked,
+    reused,
+    rulesPath,
+    removedGateway,
+    usageBackedCount,
+    emptyDataCount,
+    enumBackedCount,
+    gapApis,
+    gatewayFilteredRoles: roles.length - filteredRoles.length,
+  };
 }
 
 module.exports = {
@@ -337,6 +466,7 @@ module.exports = {
   renderHandler,
   loadExistingContracts,
   listExistingMockKeys,
+  cleanupGatewayOnlyMocks,
 };
 
 if (require.main === module) {

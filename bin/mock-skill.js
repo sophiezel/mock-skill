@@ -43,6 +43,7 @@ Usage:
   mock-skill set-case <apiId> <caseId> [--task=ID]
   mock-skill smoke [--name=slug]
   mock-skill audit [--task=ID] [--api=host/path]
+  mock-skill capture-merge [--name=slug] [--task=ID]
   mock-skill install | uninstall
 
 Install:
@@ -204,6 +205,14 @@ async function main() {
     const rows = readAudit(projectSlug, { taskId: f.task, api: f.api });
     console.log(JSON.stringify(rows, null, 2));
     console.log(`[mock-skill] ${rows.length} audit rows`);
+    return;
+  }
+
+  if (cmd === 'capture-merge') {
+    const { resolveProjectSlug } = require('../lib/paths');
+    const { captureMerge } = require('../scripts/capture-merge');
+    const projectSlug = resolveProjectSlug(process.cwd(), f.name);
+    captureMerge(projectSlug, { taskId: f.task || null });
     return;
   }
 

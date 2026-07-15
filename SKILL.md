@@ -43,13 +43,20 @@ disable-model-invocation: true
 /Users/xuwei/Profession/mock/scripts/install.sh
 cd <frontend>
 mock-skill init [--task=ID] [--related-from=doc]
+# 看 reports/* 与 coverage-summary.json 的 gapApis / emptyDataCount
 mock-skill session start --task=ID --start-url=http://localhost:8080
+# 走主路径后回灌运行时字段
+mock-skill capture-merge --name=<projectSlug>
 mock-skill audit --task=ID
 mock-skill smoke
 ```
 
+IO 反推用 ts-morph（引用 + 属性链 + 枚举）；不读 `src/mock`；不承诺零遗漏，缺口进 `coverage.gaps`。
+
 ## References
 
+- `docs/DECISIONS.md` — 定稿决策
+- `docs/README.md` — 文档索引与计划存档
 - `references/classify-request.md`
 - `references/contract-schema.md`
 - `references/infer-from-usage.md`

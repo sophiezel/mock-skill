@@ -62,3 +62,9 @@ mock-skill session start --proxy-port=19000
 ## Agent Skill
 
 安装后通过 symlink 暴露为 `api-mock-orchestrator`。详见 [`SKILL.md`](./SKILL.md)。
+
+## 文档
+
+- 定稿决策：[docs/DECISIONS.md](./docs/DECISIONS.md)
+- 索引与计划存档：[docs/README.md](./docs/README.md)
+- 操作手册：[`references/`](./references/)
