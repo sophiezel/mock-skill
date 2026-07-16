@@ -3,10 +3,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-
-function delay(ms, value) {
-  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
-}
+const { resolveCase, pickCase, isDescriptor } = require('../../lib/case-resolve');
 
 function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
   const clean = urlPath.replace(/\/+$/, '') || '/';
@@ -35,6 +32,23 @@ function clearRequireCache(filePath) {
   }
 }
 
+function sendPlan(res, plan) {
+  if (plan.fault === 'reset') {
+    res.destroy();
+    return;
+  }
+  if (plan.fault === 'hang') {
+    // do not write anything; let client timeout
+    return;
+  }
+  const status = plan.httpStatus > 0 ? plan.httpStatus : 200;
+  if (plan.body === undefined || plan.body === null) {
+    res.status(status).end();
+    return;
+  }
+  res.status(status).json(plan.body);
+}
+
 function createRouter({ mocksRoot, caseHeader }) {
   const router = express.Router();
 
@@ -54,6 +68,7 @@ function createRouter({ mocksRoot, caseHeader }) {
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
       if (/^\s*{[\s\S]*}\s*$/.test(raw)) {
+        // static JSON file (legacy)
         res.json(JSON.parse(raw));
         return;
       }
@@ -63,19 +78,40 @@ function createRouter({ mocksRoot, caseHeader }) {
         req.headers[caseHeader] ||
         req.query.__mockCase ||
         req.query.mockCase;
-      const payload = await delay(
-        50,
-        fn({
-          method: req.method,
-          query: req.query,
-          params: req.params,
-          body: req.body,
-          headers: req.headers,
-          path: req.path,
-          caseId: mockCase,
-        }),
-      );
-      res.json(payload);
+
+      const result = await fn({
+        method: req.method,
+        query: req.query,
+        params: req.params,
+        body: req.body,
+        headers: req.headers,
+        path: req.path,
+        caseId: mockCase,
+      });
+
+      // Legacy: handler returned a plain envelope body. Default 200, no delay/fault.
+      // New: handler may return a descriptor { httpStatus, body, delayMs, fault } or a cases map + active caseId.
+      let plan;
+      if (isDescriptor(result)) {
+        plan = resolveCase(mockCase, result);
+      } else if (
+        result &&
+        typeof result === 'object' &&
+        !Array.isArray(result) &&
+        result.cases &&
+        typeof result.cases === 'object'
+      ) {
+        const entry = pickCase(result.cases, mockCase || result.defaultCase || 'success');
+        plan = resolveCase(mockCase || result.defaultCase || 'success', entry);
+      } else {
+        plan = resolveCase(mockCase, { response: result });
+      }
+
+      if (plan.delayMs && plan.delayMs > 0) {
+        setTimeout(() => sendPlan(res, plan), plan.delayMs);
+      } else {
+        sendPlan(res, plan);
+      }
     } catch (err) {
       res.status(500).json({
         code: 500,

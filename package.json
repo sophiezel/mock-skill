@@ -1,13 +1,15 @@
 {
   "name": "mock-skill",
   "version": "1.0.0",
-  "description": "Built-in mock runtime + proxy for zero-intrusion frontend self-test",
+  "description": "Generic zero-coupling frontend API mock (self-test + E2E, desktop + on-device WebView)",
   "bin": {
     "mock-skill": "./bin/mock-skill.js"
   },
   "scripts": {
     "mock-skill": "node ./bin/mock-skill.js",
-    "install:local": "bash ./scripts/install.sh"
+    "install:local": "bash ./scripts/install.sh",
+    "test": "node --test test/cors.test.js test/match-rule.test.js test/case-resolve.test.js test/scenario.test.js test/materialize.test.js test/mock-router-cases.test.js test/proxy-inject-case.test.js test/start-session-proxy.test.js test/infer-adapter.test.js",
+    "test:smoke": "node scripts/run-fixture-smoke.js"
   },
   "engines": {
     "node": ">=18"

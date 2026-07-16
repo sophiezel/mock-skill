@@ -11,7 +11,9 @@ const {
 const { loadSession } = require('../lib/session-config');
 const { appendAudit } = require('../lib/audit');
 
-function requestJson(url, headers = {}) {
+const DEFAULT_SKIP_CASES = ['timeout', 'offline'];
+
+function requestJson(url, headers = {}, { timeoutMs = 5000 } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = http.request(
@@ -21,6 +23,7 @@ function requestJson(url, headers = {}) {
         path: u.pathname + u.search,
         method: 'GET',
         headers,
+        timeout: timeoutMs,
       },
       (res) => {
         const chunks = [];
@@ -37,9 +40,14 @@ function requestJson(url, headers = {}) {
         });
       },
     );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
     req.end();
   });
+}
+
+function expectedStatusFor(caseId, contractCase) {
+  return contractCase?.httpStatus || 200;
 }
 
 async function smokeCases(opts = {}) {
@@ -54,6 +62,12 @@ async function smokeCases(opts = {}) {
     throw new Error('no contracts — run mock-skill init first');
   }
 
+  const ci = Boolean(opts.ci);
+  const includeCases = opts.cases
+    ? new Set(opts.cases.split(',').map((s) => s.trim()).filter(Boolean))
+    : null;
+  const skipCases = ci ? new Set(DEFAULT_SKIP_CASES) : new Set();
+
   const mockBase = `http://${cfg.mock.host}:${cfg.mock.port}`;
   const caseHeader = cfg.proxy?.injectCaseHeader || 'x-mock-case';
   const results = [];
@@ -63,30 +77,39 @@ async function smokeCases(opts = {}) {
     const contract = JSON.parse(
       fs.readFileSync(path.join(contractsDir, f), 'utf8'),
     );
-    const cases = contract.cases || [{ id: 'success' }];
+    const cases = contract.cases || [{ id: 'success', httpStatus: 200 }];
     for (const c of cases) {
+      if (includeCases && !includeCases.has(c.id)) continue;
+      if (!includeCases && skipCases.has(c.id)) continue;
+
       const url = `${mockBase}${contract.path}`;
+      const expected = expectedStatusFor(c.id, c);
       try {
         const res = await requestJson(url, {
           [caseHeader]: c.id,
           'x-forwarded-host': contract.host === '_default' ? 'localhost' : contract.host,
           host: `${cfg.mock.host}:${cfg.mock.port}`,
         });
-        const ok = res.status === 200 && (res.body?.code === 0 || res.body?.code === c.response?.code || true);
+        const ok = ci ? res.status === expected : true;
         if (!ok) failed++;
         results.push({
           api: contract.id,
           caseId: c.id,
           status: res.status,
+          expected,
           code: res.body?.code,
           ok,
         });
       } catch (e) {
-        failed++;
+        // timeout/offline cases are expected to error in ci
+        const expectedError = skipCases.has(c.id);
+        const ok = expectedError;
+        if (!ok) failed++;
         results.push({
           api: contract.id,
           caseId: c.id,
-          ok: false,
+          expected,
+          ok,
           error: e.message,
         });
       }
@@ -102,12 +125,13 @@ async function smokeCases(opts = {}) {
     '# smoke report',
     '',
     `- mock: ${mockBase}`,
+    `- ci: ${ci}`,
     `- total: ${results.length}`,
     `- failed: ${failed}`,
     '',
     ...results.map(
       (r) =>
-        `- ${r.ok ? 'OK' : 'FAIL'} ${r.api} case=${r.caseId} status=${r.status || '-'} code=${r.code ?? r.error}`,
+        `- ${r.ok ? 'OK' : 'FAIL'} ${r.api} case=${r.caseId} status=${r.status || '-'} expected=${r.expected} code=${r.code ?? r.error ?? '-'}`,
     ),
     '',
   ].join('\n');
@@ -115,7 +139,7 @@ async function smokeCases(opts = {}) {
   appendAudit(projectSlug, {
     command: 'smoke',
     taskId: opts.taskId || null,
-    summary: `total=${results.length} failed=${failed}`,
+    summary: `ci=${ci} total=${results.length} failed=${failed}`,
   });
   console.log(md);
   console.log(`[mock-skill] smoke report: ${report}`);

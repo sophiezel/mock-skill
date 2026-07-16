@@ -25,7 +25,7 @@ function setCase(opts = {}) {
     summary: `case=${caseId}`,
   });
   console.log(`[mock-skill] set case ${apiId} -> ${caseId}`);
-  console.log('[mock-skill] restart session (or reloadRules) to apply if proxy already running');
+  console.log('[mock-skill] session picks up via ≤1s cache; no restart needed');
 }
 
 module.exports = { setCase };

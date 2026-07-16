@@ -13,4 +13,12 @@
 | dependency | 有则复用；无则用法倒推 | 复用/生成 |
 | unrelated | 同 dependency | 复用/生成 |
 
-`--task` 只写入 history/changelog，不拆目录。
+## LLM / 人介入边界（§3.1）
+
+| 场景 | 是否 LLM/人 |
+|------|-------------|
+| 有 `--task` / `--related-from` / 明确需求语义 | **是**（或人）：判定相关与 role |
+| **无任务全量 init** | **否**：启发式全部标为 `dependency`（项目基线），不强行 LLM |
+| `new` 无文档 IO | **是**（或人）+ 工具 BLOCK；禁止引擎臆造 |
+
+`--task` 只写入 history/changelog，不拆目录。E2E 前显式 `set-scenario`；冲突未决议不 generate 覆盖。

@@ -94,12 +94,9 @@ function discoverServiceBases(projectDir) {
           depth,
         };
         const prev = byKey.get(m[1]);
-        // Prefer guazi-cloud.com over stage/preview
-        if (
-          !prev ||
-          (/\.guazi-cloud\.com$/i.test(entry.host) &&
-            !/\.guazi-cloud\.com$/i.test(prev.host))
-        ) {
+        // Generic preference: keep the entry with a deeper prefix (more specific),
+        // otherwise keep the first seen. No company-specific host preference.
+        if (!prev || entry.depth > prev.depth) {
           byKey.set(m[1], entry);
         }
       } catch {
@@ -349,13 +346,23 @@ function extractLegacyApis(content, file, serviceBases) {
   const absRe = /(['"`])https?:\/\/([^'"`/?#]+)(\/[^'"`]*)?\1/g;
   const axiosUrlRe =
     /axios\.(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
-  const pathWithGatewayRe =
-    /['"`](\/(?:cars-task|csp-task|cars-misc|cars-evaluate|jian-service|eva-schedule|opl-car-evaluate|cars-dispatch|csp-dispatch|eva-training|external|api)[^'"`]*)['"`]/g;
+  const fetchUrlRe = /\bfetch\s*\(\s*(['"`])([^'"`]+)\1/gi;
+  // Generic: any quoted multi-segment path literal (e.g. '/v1/users', '/users/{id}').
+  // Host is resolved from matching service-base prefix; no hardcoded gateway names.
+  const pathLiteralRe =
+    /['"`](\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._{}$\-]+(?:\?[^'"`]*)?)['"`]/g;
 
   const prefixByHost = new Map();
   for (const b of serviceBases) {
     if (!prefixByHost.has(b.host)) prefixByHost.set(b.host, []);
     prefixByHost.get(b.host).push(b);
+  }
+
+  function methodFromFetchLine(line, fromIndex) {
+    const slice = line.slice(fromIndex);
+    const m = /method\s*:\s*['"`](GET|POST|PUT|DELETE|PATCH)['"`]/i.exec(slice);
+    if (m) return m[1].toUpperCase();
+    return 'GET';
   }
 
   for (let i = 0; i < lines.length; i++) {
@@ -366,9 +373,14 @@ function extractLegacyApis(content, file, serviceBases) {
       continue;
     }
 
+    const hasFetch = /\bfetch\s*\(/.test(line);
+    const hasAxios = /\baxios\./.test(line);
+
     absRe.lastIndex = 0;
     let m;
     while ((m = absRe.exec(line))) {
+      // Dedicated fetch/axios extractors own method detection on these lines
+      if (hasFetch || hasAxios) continue;
       const p = (m[3] || '/').split('?')[0];
       if (!p || p === '/') continue;
       if (isGatewayOnlyPath(p, serviceBases)) continue;
@@ -410,11 +422,42 @@ function extractLegacyApis(content, file, serviceBases) {
         });
       }
     }
+
+    fetchUrlRe.lastIndex = 0;
+    while ((m = fetchUrlRe.exec(line))) {
+      const raw = m[2];
+      const method = methodFromFetchLine(line, m.index);
+      if (raw.startsWith('http')) {
+        try {
+          const u = new URL(raw.replace(/\$\{[^}]+\}/g, '1'));
+          if (isGatewayOnlyPath(u.pathname, serviceBases)) continue;
+          push({
+            method,
+            host: u.host,
+            path: u.pathname,
+            line: lineNo,
+            confidence: 'high',
+          });
+        } catch {
+          /* ignore */
+        }
+      } else if (raw.startsWith('/')) {
+        const full = raw.split('?')[0];
+        if (isGatewayOnlyPath(full, serviceBases)) continue;
+        push({
+          method,
+          host: '_default',
+          path: full,
+          line: lineNo,
+          confidence: 'medium',
+        });
+      }
+    }
   }
 
-  pathWithGatewayRe.lastIndex = 0;
+  pathLiteralRe.lastIndex = 0;
   let pm;
-  while ((pm = pathWithGatewayRe.exec(content))) {
+  while ((pm = pathLiteralRe.exec(content))) {
     const p = pm[1].split('?')[0];
     if (isGatewayOnlyPath(p, serviceBases)) continue;
     // Resolve host from matching prefix
@@ -485,8 +528,44 @@ function dedupe(apis) {
   return list;
 }
 
+function loadInferConfig() {
+  try {
+    const file = path.join(__dirname, '..', 'config', 'default.infer.json');
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return { denyHostSuffixes: [], denyHostKeywords: [] };
+  }
+}
+
+function isDeniedHost(host, cfg) {
+  if (!host || host === '_default') return false;
+  const h = host.toLowerCase();
+  const suffixes = cfg?.denyHostSuffixes || [];
+  const keywords = cfg?.denyHostKeywords || [];
+  if (suffixes.some((s) => h.endsWith(s.toLowerCase()))) return true;
+  if (keywords.some((k) => h.includes(k.toLowerCase()))) return true;
+  return false;
+}
+
+function loadAdapter(name) {
+  if (!name) return null;
+  const safe = String(name);
+  if (!/^[a-zA-Z0-9_-]+$/.test(safe)) {
+    throw new Error(`invalid adapter name: ${name}`);
+  }
+  const file = path.join(__dirname, '..', 'adapters', `${safe}.js`);
+  if (!fs.existsSync(file)) {
+    throw new Error(`adapter not found: ${name} (expected adapters/${safe}.js)`);
+  }
+  // Fresh require so tests can swap; adapters are small.
+  delete require.cache[require.resolve(file)];
+  return require(file);
+}
+
 function inferApiUsage(projectDir, opts = {}) {
   const serviceBases = discoverServiceBases(projectDir);
+  const inferCfg = loadInferConfig();
+  const adapter = opts.adapter ? loadAdapter(opts.adapter) : null;
   const files = walk(projectDir);
   const all = [];
   let gatewayFilteredCount = 0;
@@ -518,12 +597,17 @@ function inferApiUsage(projectDir, opts = {}) {
       // Also catch literal /cars-task/external in services
       all.push(...extractLegacyApis(content, rel, serviceBases));
     }
+    if (adapter && typeof adapter.extract === 'function') {
+      const extra = adapter.extract({ content, rel, serviceBases }) || [];
+      all.push(...extra);
+    }
   }
 
   const deduped = dedupe(all);
+  const filtered = deduped.filter((a) => !isDeniedHost(a.host, inferCfg));
 
   // Optionally enrich with ts-morph usage IO
-  let enriched = deduped;
+  let enriched = filtered;
   if (opts.withUsageIo !== false) {
     try {
       const { enrichApisWithUsageIo } = require('./infer-usage-io');
@@ -532,12 +616,16 @@ function inferApiUsage(projectDir, opts = {}) {
       console.warn(
         `[mock-skill] usage-io enrich skipped: ${err.message}`,
       );
-      enriched = deduped;
+      enriched = filtered;
     }
   }
 
   Object.defineProperty(enriched, 'meta', {
-    value: { serviceBases, gatewayFilteredCount },
+    value: {
+      serviceBases,
+      gatewayFilteredCount,
+      adapter: adapter ? adapter.name || opts.adapter : null,
+    },
     enumerable: false,
     writable: true,
   });
@@ -550,6 +638,8 @@ module.exports = {
   joinPrefix,
   isGatewayOnlyPath,
   pathDepth,
+  extractCreateRequestApis,
+  loadAdapter,
 };
 
 if (require.main === module) {

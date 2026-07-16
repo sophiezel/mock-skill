@@ -31,6 +31,88 @@ function hintListToObject(hints) {
   return hints;
 }
 
+function buildStandardCases(dataSample, enumCases = []) {
+  const emptyData = Array.isArray(dataSample) ? [] : {};
+  return [
+    {
+      id: 'success',
+      when: {},
+      response: { code: 0, data: dataSample, message: '' },
+      httpStatus: 200,
+    },
+    {
+      id: 'empty',
+      when: { header: { 'x-mock-case': 'empty' } },
+      response: { code: 0, data: emptyData, message: '' },
+      httpStatus: 200,
+    },
+    {
+      id: 'biz_error',
+      when: { header: { 'x-mock-case': 'biz_error' } },
+      response: { code: 50000, data: null, message: 'mock business error' },
+      httpStatus: 200,
+    },
+    {
+      id: 'http_401',
+      when: { header: { 'x-mock-case': 'http_401' } },
+      response: { code: 401, data: null, message: 'unauthorized' },
+      httpStatus: 401,
+    },
+    {
+      id: 'http_403',
+      when: { header: { 'x-mock-case': 'http_403' } },
+      response: { code: 403, data: null, message: 'forbidden' },
+      httpStatus: 403,
+    },
+    {
+      id: 'http_404',
+      when: { header: { 'x-mock-case': 'http_404' } },
+      response: { code: 404, data: null, message: 'not found' },
+      httpStatus: 404,
+    },
+    {
+      id: 'http_500',
+      when: { header: { 'x-mock-case': 'http_500' } },
+      response: { code: 500, data: null, message: 'internal server error' },
+      httpStatus: 500,
+    },
+    {
+      id: 'http_502',
+      when: { header: { 'x-mock-case': 'http_502' } },
+      response: { code: 502, data: null, message: 'bad gateway / dep fail' },
+      httpStatus: 502,
+    },
+    {
+      id: 'dep_fail',
+      when: { header: { 'x-mock-case': 'dep_fail' } },
+      response: { code: 502, data: null, message: 'dependency failure' },
+      httpStatus: 502,
+    },
+    {
+      id: 'slow',
+      when: { header: { 'x-mock-case': 'slow' } },
+      response: { code: 0, data: dataSample, message: '' },
+      httpStatus: 200,
+      meta: { delayMs: 3000 },
+    },
+    {
+      id: 'timeout',
+      when: { header: { 'x-mock-case': 'timeout' } },
+      response: { code: 0, data: null, message: '' },
+      httpStatus: 0,
+      meta: { delayMs: 60000, fault: 'hang' },
+    },
+    {
+      id: 'offline',
+      when: { header: { 'x-mock-case': 'offline' } },
+      response: { code: 0, data: null, message: '' },
+      httpStatus: 0,
+      meta: { fault: 'reset' },
+    },
+    ...enumCases,
+  ];
+}
+
 function buildContract(roleEntry, { taskId, source, resolution }) {
   const id = apiKey(roleEntry);
   const now = new Date().toISOString();
@@ -66,28 +148,7 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
     gaps: ['unknown'],
   };
 
-  const cases = [
-    {
-      id: 'success',
-      when: {},
-      response: { code: 0, data: dataSample, message: '' },
-    },
-    {
-      id: 'empty',
-      when: { header: { 'x-mock-case': 'empty' } },
-      response: {
-        code: 0,
-        data: Array.isArray(dataSample) ? [] : {},
-        message: '',
-      },
-    },
-    {
-      id: 'biz_error',
-      when: { header: { 'x-mock-case': 'biz_error' } },
-      response: { code: 50000, data: null, message: 'mock business error' },
-    },
-    ...enumCases,
-  ];
+  const cases = buildStandardCases(dataSample, enumCases);
 
   return {
     id,
@@ -127,7 +188,16 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
 
 function renderHandler(contract) {
   const casesJson = JSON.stringify(
-    Object.fromEntries(contract.cases.map((c) => [c.id, c.response])),
+    Object.fromEntries(
+      contract.cases.map((c) => [
+        c.id,
+        {
+          response: c.response,
+          httpStatus: c.httpStatus,
+          meta: c.meta,
+        },
+      ]),
+    ),
     null,
     2,
   );
@@ -135,10 +205,8 @@ function renderHandler(contract) {
 module.exports = ({ method, query, params, body, headers, caseId }) => {
   const cases = ${casesJson};
   const id = caseId || (headers && (headers['x-mock-case'] || headers['X-Mock-Case'])) || 'success';
-  if (cases[id]) {
-    return cases[id];
-  }
-  return cases.success || { code: 0, data: {}, message: '' };
+  const entry = cases[id] || cases.success || { response: { code: 0, data: {}, message: '' }, httpStatus: 200 };
+  return entry;
 };
 `;
 }

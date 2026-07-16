@@ -63,7 +63,7 @@ function classifyRequests(opts) {
     );
 
     const relatedToTask = Boolean(taskId && (pathHit || evidenceHit || keywords.length === 0 && false));
-    // Without task: treat as project baseline → unrelated
+    // Without task: treat as project baseline → dependency (generate/reuse)
     let related = Boolean(taskId) && (pathHit || evidenceHit);
 
     // If task + relatedFrom file mentions path explicitly
@@ -71,7 +71,7 @@ function classifyRequests(opts) {
 
     let role = 'unrelated';
     if (!taskId) {
-      role = hasMock ? 'unrelated' : 'unrelated';
+      role = 'dependency';
     } else if (!related) {
       role = 'unrelated';
     } else if (!hasMock && !existing) {

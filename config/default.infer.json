@@ -1,0 +1,23 @@
+{
+  "denyHostSuffixes": [
+    "cdn.example.com",
+    ".akamaihd.net",
+    ".cloudfront.net",
+    ".fastly.net",
+    ".jsdelivr.net",
+    ".unpkg.com",
+    ".w3.org",
+    ".schema.org"
+  ],
+  "denyHostKeywords": [
+    "static.",
+    "image-",
+    "images.",
+    "assets.",
+    "fonts.",
+    "stats.",
+    "analytics.",
+    "log.",
+    "track."
+  ]
+}

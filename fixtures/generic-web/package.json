@@ -1,0 +1,6 @@
+{
+  "name": "generic-web-fixture",
+  "version": "1.0.0",
+  "description": "Generic web fixture for mock-skill CI: axios + fetch API usage samples. No company domain, no custom request wrapper.",
+  "private": true
+}

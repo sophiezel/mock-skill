@@ -15,6 +15,7 @@ const {
   loadExistingContracts,
   listExistingMockKeys,
 } = require('./generate-mock');
+const { copyBuiltinScenarios } = require('../lib/scenario');
 
 async function initProject(opts = {}) {
   const projectDir = path.resolve(opts.projectDir || process.cwd());
@@ -29,11 +30,15 @@ async function initProject(opts = {}) {
 
   const projectSlug = resolveProjectSlug(projectDir, nameOverride);
   ensureProjectDirs(projectSlug);
+  const copiedScenarios = copyBuiltinScenarios(projectSlug);
 
   console.log(`[mock-skill] init projectDir=${projectDir}`);
   console.log(`[mock-skill] projectSlug=${projectSlug} taskId=${taskId || 'adhoc'}`);
 
-  const apis = inferApiUsage(projectDir, { withUsageIo: true });
+  const apis = inferApiUsage(projectDir, {
+    withUsageIo: true,
+    adapter: opts.adapter || null,
+  });
   const meta = apis.meta || {};
   // apis is array with meta property
   const apiList = Array.isArray(apis) ? apis : [];
@@ -82,9 +87,6 @@ async function initProject(opts = {}) {
   writeClassifyResult(projectSlug, classified);
 
   const roles = classified.roles.map((r) => {
-    if (!taskId && r.role === 'new') {
-      return { ...r, role: 'unrelated', blocked: false };
-    }
     if (!taskId) return { ...r, blocked: false };
     if (r.role === 'new' && !relatedFrom) return { ...r, blocked: true };
     if (r.role === 'new' && relatedFrom) return { ...r, blocked: false };
@@ -180,6 +182,9 @@ async function initProject(opts = {}) {
   });
 
   console.log(`[mock-skill] report: ${reportPath}`);
+  if (copiedScenarios.length) {
+    console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
+  }
   console.log(
     `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} gaps=${(gen.gapApis || []).length}`,
   );

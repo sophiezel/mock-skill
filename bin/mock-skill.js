@@ -33,24 +33,29 @@ function parseArgs(argv) {
 
 function help() {
   console.log(`
-mock-skill — built-in mock runtime + proxy (zero-intrusion self-test)
+mock-skill — generic zero-coupling frontend API mock (self-test + E2E)
 
 Usage:
-  mock-skill init [projectDir] [--name=slug] [--task=ID] [--related-from=path] [--force]
+  mock-skill init [projectDir] [--name=slug] [--task=ID] [--related-from=path] [--adapter=name] [--force]
   mock-skill classify [--task=ID] [--related-from=path]
   mock-skill generate [--task=ID] [--force]
-  mock-skill session start|stop [--name=slug] [--task=ID] [--mock-port=N] [--proxy-port=N] [--proxy=0|1] [--start-url=URL] [--no-auto-launch]
+  mock-skill session start|stop [--name=slug] [--task=ID] [--mock-port=N] [--proxy-port=N] [--proxy-host=HOST] [--proxy=0|1] [--start-url=URL] [--no-auto-launch] [--scenario=NAME]
   mock-skill set-case <apiId> <caseId> [--task=ID]
-  mock-skill smoke [--name=slug]
+  mock-skill set-scenario <name> [--name=slug]
+  mock-skill smoke [--name=slug] [--ci] [--cases=...] [--scenario=NAME]
   mock-skill audit [--task=ID] [--api=host/path]
   mock-skill capture-merge [--name=slug] [--task=ID]
   mock-skill install | uninstall
 
 Install:
-  /Users/xuwei/Profession/mock/scripts/install.sh
+  bash scripts/install.sh
 
 Data:
   .data/projects/<projectSlug>/
+
+Device (on-device WebView via Wi-Fi proxy, zero business-code change):
+  mock-skill session start --proxy-host=0.0.0.0
+  # then set phone Wi-Fi manual proxy to the printed LAN IP:port
 `);
 }
 
@@ -86,6 +91,7 @@ async function main() {
       name: f.name,
       taskId: f.task || null,
       relatedFrom: f['related-from'] || null,
+      adapter: f.adapter || null,
       force: Boolean(f.force),
       writeProjectConfig: Boolean(f['write-project-config']),
     });
@@ -157,9 +163,11 @@ async function main() {
         taskId: f.task || null,
         mockPort: f['mock-port'],
         proxyPort: f['proxy-port'],
+        proxyHost: f['proxy-host'],
         proxy: f.proxy,
         startUrl: f['start-url'],
         autoLaunch: f['no-auto-launch'] ? false : undefined,
+        scenario: f.scenario,
       });
       return;
     }
@@ -188,12 +196,29 @@ async function main() {
     return;
   }
 
+  if (cmd === 'set-scenario') {
+    const { setScenario } = require('../scripts/set-scenario');
+    setScenario({
+      projectDir: process.cwd(),
+      name: f.name,
+      scenario: rest[0],
+      taskId: f.task || null,
+    });
+    return;
+  }
+
   if (cmd === 'smoke') {
     const { smokeCases } = require('../scripts/smoke-cases');
+    if (f.scenario) {
+      const { setScenario } = require('../scripts/set-scenario');
+      setScenario({ projectDir: process.cwd(), name: f.name, scenario: f.scenario, taskId: f.task || null });
+    }
     await smokeCases({
       projectDir: process.cwd(),
       name: f.name,
       taskId: f.task || null,
+      ci: Boolean(f.ci),
+      cases: f.cases,
     });
     return;
   }

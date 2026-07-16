@@ -6,32 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
 const { applyCorsHeaders, handleOptions } = require('../../lib/cors');
+const { matchRule } = require('../../lib/match-rule');
 
 function loadRules(rulesPath) {
   if (!rulesPath || !fs.existsSync(rulesPath)) return [];
   return JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
-}
-
-function matchRule(rules, hostname, urlPath, method) {
-  const m = (method || 'GET').toUpperCase();
-  for (const rule of rules) {
-    const hostOk =
-      !rule.host ||
-      rule.host === hostname ||
-      rule.host === '*' ||
-      (rule.host.startsWith('*.') && hostname.endsWith(rule.host.slice(1)));
-    const pathOk =
-      !rule.pathPrefix ||
-      urlPath === rule.pathPrefix ||
-      urlPath.startsWith(rule.pathPrefix.replace(/\/$/, '') + '/') ||
-      urlPath.startsWith(rule.pathPrefix);
-    const methodOk =
-      !rule.methods ||
-      rule.methods.map((x) => x.toUpperCase()).includes(m) ||
-      rule.methods.includes('*');
-    if (hostOk && pathOk && methodOk) return rule;
-  }
-  return null;
 }
 
 function readBody(req) {
@@ -52,6 +31,7 @@ function startProxyServer(opts) {
     rulesPath,
     cors = {},
     cases = { default: 'success', active: {} },
+    casesLoader = null, // optional () => cases, for hot-reload (≤1s cache)
     caseHeader = 'x-mock-case',
     missPolicy = 'passthrough',
     blockWritePassthrough = true,
@@ -64,6 +44,18 @@ function startProxyServer(opts) {
 
   let activeRules = rules.length ? rules : loadRules(rulesPath);
   let activeCases = { ...cases };
+  let casesCacheAt = 0;
+  const CASES_TTL_MS = 1000;
+
+  function currentCases() {
+    if (!casesLoader) return activeCases;
+    const now = Date.now();
+    if (now - casesCacheAt > CASES_TTL_MS) {
+      activeCases = { ...casesLoader() };
+      casesCacheAt = now;
+    }
+    return activeCases;
+  }
 
   const mockUrl = new URL(mockTarget);
 
@@ -136,10 +128,11 @@ function startProxyServer(opts) {
 
       const rule = matchRule(activeRules, hostname, urlPath, method);
       if (rule) {
+        const cs = currentCases();
         const caseId =
-          activeCases.active?.[rule.id] ||
-          activeCases.active?.[`${method} ${hostname}${urlPath}`] ||
-          activeCases.default ||
+          cs.active?.[rule.id] ||
+          cs.active?.[`${method} ${hostname}${urlPath}`] ||
+          cs.default ||
           'success';
 
         const headers = { ...req.headers };
@@ -309,6 +302,7 @@ function startProxyServer(opts) {
         url: `http://${host}:${port}`,
         setCases(next) {
           activeCases = { ...activeCases, ...next };
+          casesCacheAt = 0;
         },
         reloadRules(nextRules) {
           activeRules = nextRules;
