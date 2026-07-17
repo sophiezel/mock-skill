@@ -20,7 +20,7 @@ npm link
 SKILL_LINK="${HOME}/.agents/skills/api-mock-orchestrator"
 mkdir -p "${HOME}/.agents/skills"
 ln -sfn "$ROOT" "$SKILL_LINK"
-echo "[mock-skill] skill symlink: $SKILL_LINK -> $ROOT"
+echo "[mock-skill] skill symlink (optional Agent orchestration): $SKILL_LINK -> $ROOT"
 
 echo ""
 echo "[mock-skill] done. Try:"

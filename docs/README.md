@@ -1,12 +1,14 @@
 # mock-skill 文档索引
 
-本目录存放设计定稿与历史计划存档。运行时说明仍以仓库根 [`README.md`](../README.md)、[`SKILL.md`](../SKILL.md) 与 [`references/`](../references/) 为准。
+本目录存放设计定稿与历史计划存档。运行时说明以仓库根 [`README.md`](../README.md) 为准；Agent 裁决卡见 [`SKILL.md`](../SKILL.md)；操作细节见 [`references/`](../references/)。
+
+**角色边界**（CLI / LLM / Skill）见 [DECISIONS.md](./DECISIONS.md) § LLM 介入边界。
 
 ## 定稿
 
 | 文档 | 说明 |
 |------|------|
-| [DECISIONS.md](./DECISIONS.md) | 已锁定决策与当前约束（优先阅读） |
+| [DECISIONS.md](./DECISIONS.md) | 已锁定决策与当前约束（优先阅读；含 LLM 边界真源） |
 
 ## 操作说明（references）
 

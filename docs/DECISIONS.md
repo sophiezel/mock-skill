@@ -1,15 +1,16 @@
 # mock-skill 定稿决策
 
-最后同步：2026-07-16。与 archive 中历史计划不一致时，以本文 + 代码为准。
+最后同步：2026-07-17。与 archive 中历史计划不一致时，以本文 + 代码为准。
 
 ## 产品定位
 
 | 项 | 定稿 |
 |----|------|
-| 定位 | **通用 Agent Skill + CLI**：前端 Mock 后端 HTTP(S) 接口，后端未通时不阻塞自测与 E2E |
-| 仓库 | 本仓（git）；`scripts/install.sh` 一键 `npm link` + skill symlink |
-| Agent 发现 | symlink `~/.agents/skills/api-mock-orchestrator` → 本仓 |
-| CLI | 全局 `mock-skill`（`npm link` / `scripts/install.sh`） |
+| 定位 | **通用 Mock CLI + 可选 Agent Skill 编排层**：前端 Mock 后端 HTTP(S) 接口，后端未通时不阻塞自测与 E2E |
+| 角色一句话 | **CLI 负责确定性能力；LLM 负责有歧义的语义决策与流程编排；Skill 把边界钉死。** |
+| 仓库 | 本仓（git）；`scripts/install.sh` 一键 `npm link` + 可选 skill symlink |
+| Agent 发现 | 可选 symlink `~/.agents/skills/api-mock-orchestrator` → 本仓（教 Agent 调用 CLI，非产品本体） |
+| CLI | 全局 `mock-skill`（`npm link` / `scripts/install.sh`）— **主产品** |
 | 运行时 | **路线 A**：编排 + 正向代理 + Mock **全在本仓 Node**；借鉴 WireMock **语义**（delay/fault/HTTP/scenario），**不**引入 WireMock/Java/Docker 运行时 |
 | 业务仓 | 默认零侵入；不改 `baseURL`、不植入 MSW |
 | 耦合边界 | **不**绑定本机绝对路径、公司域名/鉴权头、前端框架、特定请求封装 |
@@ -44,6 +45,8 @@ Classify 是否需要 LLM/人：仅当有 `--task` / `--related-from` / 明确�
 | `src/mock` | **不**作为契约来源 |
 | 完整性 | **不承诺 100% 零遗漏**；缺口写入 `coverage.gaps` / `coverage-summary.json` |
 | Host 过滤 | `config/default.infer.json`：`denyHostSuffixes`（cdn、静态站启发式）；**无公司 allowlist 写死** |
+| 样例字段 | **禁止创造响应字段**；键只来自接口侧解构/`res.data.x` 或 capture 真实 body；**不**扫 UI state 改名 |
+| 样例值 | init 用 `@faker-js/faker`（固定 seed）仅给已有键填占位；`capture-merge` 用真实值覆盖并可并入真实 body 新键 |
 | 运行时补洞 | soft proxy → `captures/` → `capture-merge`（只增不盲删） |
 
 ## 场景引擎（对齐 WireMock 语义子集）
@@ -81,6 +84,8 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 | E2E scenario 隔离 | 一 worker 一 session，或用例 `beforeEach`/`afterEach` `set-scenario` 复位；不建分布式锁 |
 
 ## LLM 介入边界
+
+> 本节为 LLM/人 vs CLI 边界的**唯一真源**。README「架构与角色」为摘要；与本节冲突时以本节为准。
 
 | 时机 | LLM？ |
 |------|-------|

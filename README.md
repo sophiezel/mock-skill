@@ -1,8 +1,34 @@
 # mock-skill
 
-通用、零耦合的前端 API Mock 编排器：内置 Mock 运行时 + 可开关正向代理，用于后端未通时的自测与 E2E（桌面 + 真机 WebView）。**不改业务仓代码**、不依赖 Whistle/Charles、不绑定特定前端框架。
+前端 API Mock **CLI**：内置 Mock 运行时 + 可开关正向代理，用于后端未通时的自测与 E2E（桌面 + 真机 WebView）。**不改业务仓代码**、不依赖 Whistle/Charles、不绑定特定前端框架。
+
+附带可选 Agent Skill 入口（教 Agent 正确调用本 CLI），**不是**产品本体。
+
+> **CLI 负责确定性能力；LLM 负责有歧义的语义决策与流程编排；Skill 把边界钉死。**
+
+## 架构与角色
+
+| 角色 | 职责 |
+|------|------|
+| CLI / runtime | discover、generate、session、proxy、scenario、capture-merge、smoke |
+| LLM（或人） | 有任务时的 classify、冲突决议、`new` IO 起草（须确认）、缺口解释与下一步 |
+| Skill（[`SKILL.md`](./SKILL.md)） | checklist + BLOCK/禁宣称规则；禁止 Agent 自写脚本绕开 CLI |
+
+LLM 介入边界（摘要；**真源**见 [`docs/DECISIONS.md`](./docs/DECISIONS.md) § LLM 介入边界）：
+
+| 时机 | LLM？ |
+|------|-------|
+| 读 Skill / 编排命令 | 是 |
+| Discover / Generate / Session / set-case\|scenario | 否 |
+| Proxy 命中、delay/fault | **否**（热路径禁模型） |
+| 无任务全量 init 的 classify | 否（启发式） |
+| 有 `--task` / 需求语义的 classify | 是（或人） |
+| `new` 无文档 IO / modify 冲突决议 | 是（或人） |
+| capture-merge 核心 / smoke | 否 |
 
 ## 一键安装
+
+先装 CLI，再按需挂 Skill：
 
 ```bash
 bash scripts/install.sh
@@ -12,6 +38,7 @@ bash scripts/install.sh
 
 ```bash
 npm install && npm link
+# 可选：供 Cursor/Agent 发现编排约束
 ln -sfn "$(pwd)" ~/.agents/skills/api-mock-orchestrator
 ```
 
@@ -27,6 +54,8 @@ mock-skill init --adapter=create-request   # 可选：叠加 adapters/<name>.js
 ```
 
 默认扫描 `fetch` / `axios` / 字符串 URL；`createRequest` 亦内置。自定义封装放 `adapters/`，用 `--adapter=` 启用。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
+
+**样例数据**：init 只根据用法倒推出的**接口字段**生成占位值（faker）；**不发明字段**。真实值请 `session` 走主路径后 `mock-skill capture-merge` 回灌。噪音路径（`e2e/`、`src/mock/`、无 request 上下文的 pathLiteral）会被过滤；`no_export_symbol` 且空 shape 不渲空 handler（`skippedEmpty`）。
 
 数据落在（扁平，一项目一份）：
 
@@ -97,13 +126,9 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 | `mock-skill audit --task=` | 追因 |
 | `mock-skill capture-merge` | 回灌运行时字段 |
 
-## Agent Skill
-
-安装后通过 symlink 暴露为 `api-mock-orchestrator`。详见 [`SKILL.md`](./SKILL.md)。
-
 ## 文档
 
-- 定稿决策：[docs/DECISIONS.md](./docs/DECISIONS.md)
+- 定稿决策（含 LLM 边界真源）：[docs/DECISIONS.md](./docs/DECISIONS.md)
 - 后续登记：[docs/BACKLOG.md](./docs/BACKLOG.md)
 - 索引与计划存档：[docs/README.md](./docs/README.md)
 - 操作手册：[`references/`](./references/)（infer / classify / scenarios / e2e）
@@ -114,3 +139,7 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 npm test                 # node:test 单测 + 集成
 npm run test:smoke       # fixtures/generic-web：init → smoke --ci → set-scenario → proxy
 ```
+
+## Agent Skill（可选）
+
+安装时的 symlink 将本仓暴露为 `api-mock-orchestrator`，供 Agent 加载**编排约束与裁决卡**（checklist / BLOCK / 场景决策树）。完整命令与端口说明以本 README 为准；Agent 入口见 [`SKILL.md`](./SKILL.md)。

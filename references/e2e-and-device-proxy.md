@@ -8,7 +8,7 @@
 mock-skill session start --start-url=http://localhost:8080
 ```
 
-Playwright 配置指向本 skill proxy：
+Playwright 配置指向本 CLI proxy：
 
 ```js
 // playwright.config.js
@@ -42,7 +42,7 @@ mock-skill session start --proxy-host=0.0.0.0 --start-url=http://localhost:8080
 ```
 
 3. 启动日志会打印 `Wi-Fi 代理: <LAN_IP>:<proxyPort>`，在手机 Wi‑Fi → 手动代理 填写该 host/port
-4. 手机 WebView 打开 H5，请求自动经本 skill proxy → mock / 透传
+4. 手机 WebView 打开 H5，请求自动经本 CLI proxy → mock / 透传
 
 ### 安全提示
 
@@ -56,7 +56,7 @@ mock-skill session start --proxy-host=0.0.0.0 --start-url=http://localhost:8080
 可行折中：
 
 - 开发环境后端走 HTTP，mock 命中 HTTP
-- 或前置已装 CA 的调试代理（如 Whistle）做 HTTPS MITM，再链到本 skill
+- 或前置已装 CA 的调试代理（如 Whistle）做 HTTPS MITM，再链到本 CLI
 - 真机 HTTPS mock 需本地 CA + 信任（P2）
 
 ## CORS / Hybrid WebView
@@ -78,4 +78,4 @@ WebView `Origin` 常非 localhost（`null`、自定义 scheme、`https://localho
 
 ## Appium 真机 E2E
 
-Appium 驱动 WebView；网络层仍靠手机 Wi‑Fi 代理 → 本 skill `proxyPort`。`beforeAll` 调 `set-scenario`，与桌面同。
+Appium 驱动 WebView；网络层仍靠手机 Wi‑Fi 代理 → 本 CLI `proxyPort`。`beforeAll` 调 `set-scenario`，与桌面同。
