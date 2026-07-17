@@ -20,5 +20,58 @@
     "log.",
     "track."
   ],
-  "denyPathSubstrings": []
+  "denyPathSubstrings": [],
+  "pathAliases": {},
+  "httpWrappers": [
+    {
+      "callee": "$HTTP",
+      "methods": {
+        "get": "GET",
+        "getP": "GET",
+        "post": "POST",
+        "postP": "POST",
+        "postJson": "POST"
+      }
+    },
+    {
+      "callee": "http",
+      "methods": {
+        "get": "GET",
+        "post": "POST",
+        "put": "PUT",
+        "delete": "DELETE",
+        "patch": "PATCH"
+      }
+    },
+    {
+      "callee": "request",
+      "methods": {
+        "get": "GET",
+        "post": "POST",
+        "put": "PUT",
+        "delete": "DELETE",
+        "patch": "PATCH"
+      }
+    },
+    {
+      "callee": "api",
+      "methods": {
+        "get": "GET",
+        "post": "POST",
+        "put": "PUT",
+        "delete": "DELETE",
+        "patch": "PATCH"
+      }
+    },
+    {
+      "callee": "apiClient",
+      "methods": {
+        "get": "GET",
+        "post": "POST",
+        "put": "PUT",
+        "delete": "DELETE",
+        "patch": "PATCH"
+      }
+    }
+  ]
 }

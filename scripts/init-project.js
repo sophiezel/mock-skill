@@ -131,6 +131,8 @@ async function initProject(opts = {}) {
     `- removedGatewayOnly: ${gen.removedGateway || 0}`,
     `- usageBackedCount: ${gen.usageBackedCount || 0}`,
     `- emptyDataCount: ${gen.emptyDataCount || 0}`,
+    `- usageBackedHints: ${gen.usageBackedHints || 0}`,
+    `- emptyDataHints: ${gen.emptyDataHints || 0}`,
     `- skippedEmptyCount: ${gen.skippedEmptyCount || 0}`,
     `- prunedHandlers: ${gen.prunedHandlers || 0}`,
     `- prunedContracts: ${gen.prunedContracts || 0}`,
@@ -139,12 +141,14 @@ async function initProject(opts = {}) {
     '',
     '## Coverage note',
     '',
-    '- **emptyData**：`success.data` 无字段（用法倒推未抽出 props）。',
-    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol`）；与 emptyData 常重叠但不是同一指标。',
-    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` / `no_property_access` / `no_callsite` → 只写 contract、不渲空 handler、不进 proxy-rules。',
+    '- **emptyData**：`success.data` 无字段（静态用法倒推未抽出 props）。含多环境 host 副本，数字会被放大。',
+    '- **usageBackedHints / emptyDataHints**：按 `exportHint` 去重后的接口函数数，更接近「有多少 service 导出没抽到字段」。',
+    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol` / `no_callsite`）；与 emptyData 常重叠但不是同一指标。',
+    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` → 只写 contract、不渲空 handler、不进 proxy-rules。已绑定 exportHint 的空 shape 仍会生成 `data:{}` handler。',
     '- **prunedHandlers / prunedContracts**：`--force` 时删除不在本轮白名单且无 `mock-skill:manual` 的孤儿产物。',
     '- 噪音过滤：跳过 `e2e/`、`*.spec.*`、`src/mock/`；pathLiteral 需 request 上下文。',
-    '- 请跑 `session` 走主路径并用 `capture-merge` 回灌真实值。',
+    '- **capture-merge**（功能完整保留）：用于补静态缺口、缺键并入、真实样例值覆盖占位——是增强环，不是 init 前置条件。有字段用法时应优先靠静态 usage-io 出非空 data。',
+    '- 项目差异：`<project>/.mock-skill/infer.json` 可覆盖 pathAliases / httpWrappers（合并 `config/default.infer.json`）。',
     '',
     '## Roles summary',
     '',
@@ -174,6 +178,8 @@ async function initProject(opts = {}) {
         discovered: apiList.length,
         usageBackedCount: gen.usageBackedCount,
         emptyDataCount: gen.emptyDataCount,
+        usageBackedHints: gen.usageBackedHints,
+        emptyDataHints: gen.emptyDataHints,
         skippedEmptyCount: gen.skippedEmptyCount,
         prunedHandlers: gen.prunedHandlers || 0,
         prunedContracts: gen.prunedContracts || 0,
@@ -189,7 +195,7 @@ async function initProject(opts = {}) {
   appendAudit(projectSlug, {
     command: 'init',
     taskId,
-    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount}`,
+    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount} usageHints=${gen.usageBackedHints} emptyHints=${gen.emptyDataHints}`,
     reportPath,
   });
 
@@ -198,7 +204,7 @@ async function initProject(opts = {}) {
     console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
   }
   console.log(
-    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
+    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
   );
 
   return {

@@ -23,7 +23,120 @@ const STATIC_EXT =
   /\.(mp3|mp4|png|jpe?g|gif|webp|svg|css|woff2?|ttf|ico|map|pdf)(\?.*)?$/i;
 const TEST_FILE_RE = /\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$/i;
 const REQ_CTX_RE =
-  /\b(createRequest|fetch\s*\(|axios\.|request\.(get|post|put|delete|patch)\s*\()/;
+  /\b(createRequest|fetch\s*\(|axios\.|request\.(get|post|put|delete|patch)\s*\(|\$HTTP\.(get|getP|post|postP|postJson)\s*\()/;
+
+const NAV_CTX_RE =
+  /location\.href\s*=|window\.location|createWebView|:url\s*=|\burl\s*[:=]/;
+
+const {
+  extractHttpWrapperApis,
+  buildWrapperPresenceRe,
+  buildReqCtxRe,
+  resolveWrapperMethod,
+} = require('../lib/infer/http-wrappers');
+
+/**
+ * Map legacy $HTTP verb → HTTP method (kept for tests / callers).
+ * @param {string} verb
+ * @returns {'GET'|'POST'}
+ */
+function httpWrapperMethod(verb) {
+  return resolveWrapperMethod(verb, {
+    get: 'GET',
+    getp: 'GET',
+    post: 'POST',
+    postp: 'POST',
+    postjson: 'POST',
+  });
+}
+
+/**
+ * Parse `//host[/prefix]` or `https://host[/prefix]` into { host, prefix }.
+ * @param {string} raw
+ * @returns {{ host: string, prefix: string }|null}
+ */
+function parseHostUrlLiteral(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let url = raw.trim();
+  if (url.startsWith('//')) url = `https:${url}`;
+  try {
+    const u = new URL(url);
+    if (!u.host) return null;
+    if (STATIC_EXT.test(u.pathname)) return null;
+    return {
+      host: u.host,
+      prefix: u.pathname.replace(/\/+$/, '') || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Collect identifier = '//host' | 'https://host' assignments across the project.
+ * Same variable may have multiple env hosts — all are kept (full expansion).
+ * @param {string} projectDir
+ * @param {string[]} [files]
+ * @returns {Map<string, Array<{ host: string, prefix: string }>>}
+ */
+function discoverHostVarAssignments(projectDir, files) {
+  const fileList = files || walk(projectDir);
+  /** @type {Map<string, Array<{ host: string, prefix: string }>>} */
+  const map = new Map();
+  const assignRe =
+    /\b([A-Za-z_$][\w$]*)\s*=\s*['"`]((?:https?:)?\/\/[^'"`]+)['"`]/g;
+
+  function ingest(content) {
+    let m;
+    assignRe.lastIndex = 0;
+    while ((m = assignRe.exec(content))) {
+      const varName = m[1];
+      const parsed = parseHostUrlLiteral(m[2]);
+      if (!parsed) continue;
+      if (!map.has(varName)) map.set(varName, []);
+      const list = map.get(varName);
+      if (!list.some((e) => e.host === parsed.host && e.prefix === parsed.prefix)) {
+        list.push(parsed);
+      }
+    }
+  }
+
+  for (const file of fileList) {
+    let content;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (content.length > 1_500_000) continue;
+    if (path.extname(file) === '.vue') {
+      const { extractVueScriptBlocks } = require('../lib/vue-script');
+      for (const blk of extractVueScriptBlocks(content)) {
+        if (blk.content && blk.content.trim()) ingest(blk.content);
+      }
+    } else {
+      ingest(content);
+    }
+  }
+  return map;
+}
+
+/**
+ * True when an absolute URL on this line is navigation / WebView, not an API call.
+ * @param {string} line
+ * @param {string} [nearby]
+ */
+function isNavigationContext(line, nearby) {
+  if (
+    /\$HTTP\.|\bfetch\s*\(|\baxios\.|\brequest\.(get|post|put|delete|patch)/.test(
+      line,
+    )
+  ) {
+    return false;
+  }
+  const ctx = nearby || line;
+  return NAV_CTX_RE.test(ctx);
+}
 
 function shouldSkipFile(relPath, fileName) {
   const norm = relPath.replace(/\\/g, '/');
@@ -661,7 +774,12 @@ function extractRequestKeyUriApis(content, file, serviceBases) {
   return apis;
 }
 
-function extractLegacyApis(content, file, serviceBases) {
+function extractLegacyApis(content, file, serviceBases, hostVars = new Map(), wrappers = null) {
+  const { loadInferConfig } = require('../lib/infer/load-infer-config');
+  const wrapperList = wrappers || loadInferConfig().httpWrappers || [];
+  const wrapperPresenceRe = buildWrapperPresenceRe(wrapperList);
+  const reqCtxRe = buildReqCtxRe(wrapperList);
+
   const apis = [];
   const push = (partial) => {
     if (!partial.path || isStaticAsset(partial.path)) return;
@@ -714,6 +832,24 @@ function extractLegacyApis(content, file, serviceBases) {
     return 'GET';
   }
 
+  function nearbyText(lineIdx) {
+    const from = Math.max(0, lineIdx - 8);
+    const to = Math.min(lines.length, lineIdx + 9);
+    return lines.slice(from, to).join('\n');
+  }
+
+  // Configured HTTP wrappers: callee.`${hostVar}/path` and absolute URLs
+  extractHttpWrapperApis({
+    content,
+    hostVars,
+    serviceBases,
+    wrappers: wrapperList,
+    isGatewayOnlyPath,
+    parseHostUrlLiteral,
+    pathDepth,
+    push,
+  });
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineNo = i + 1;
@@ -724,12 +860,14 @@ function extractLegacyApis(content, file, serviceBases) {
 
     const hasFetch = /\bfetch\s*\(/.test(line);
     const hasAxios = /\baxios\./.test(line);
+    const hasHttpWrapper = wrapperPresenceRe.test(line);
 
     absRe.lastIndex = 0;
     let m;
     while ((m = absRe.exec(line))) {
-      // Dedicated fetch/axios extractors own method detection on these lines
-      if (hasFetch || hasAxios) continue;
+      // Dedicated fetch/axios/$HTTP extractors own method detection on these lines
+      if (hasFetch || hasAxios || hasHttpWrapper) continue;
+      if (isNavigationContext(line, nearbyText(i))) continue;
       const p = (m[3] || '/').split('?')[0];
       if (!p || p === '/') continue;
       if (isGatewayOnlyPath(p, serviceBases)) continue;
@@ -808,7 +946,8 @@ function extractLegacyApis(content, file, serviceBases) {
   let pm;
   while ((pm = pathLiteralRe.exec(content))) {
     const rawCap = pm[1];
-    // Drop template interpolations and incomplete paths
+    // Drop unresolved path interpolations (e.g. /users/${id}); host-var templates
+    // are handled by $HTTP extractor above.
     if (/\$\{/.test(rawCap)) continue;
     const p = rawCap.split('?')[0];
     if (isGatewayOnlyPath(p, serviceBases)) continue;
@@ -817,7 +956,7 @@ function extractLegacyApis(content, file, serviceBases) {
     const ctxStart = Math.max(0, pm.index - 120);
     const ctxEnd = Math.min(content.length, pm.index + rawCap.length + 80);
     const ctx = content.slice(ctxStart, ctxEnd);
-    if (!REQ_CTX_RE.test(ctx)) continue;
+    if (!reqCtxRe.test(ctx) && !REQ_CTX_RE.test(ctx)) continue;
     // Resolve host from matching service-base prefix
     let host = '_default';
     for (const b of serviceBases) {
@@ -838,7 +977,7 @@ function extractLegacyApis(content, file, serviceBases) {
     }
   }
 
-  // Bind export function/const wrappers that contain the URL/path (fetch/axios)
+  // Bind export function/const wrappers that contain the URL/path (fetch/axios/$HTTP)
   bindLegacyExportHints(content, apis);
 
   return apis;
@@ -846,25 +985,34 @@ function extractLegacyApis(content, file, serviceBases) {
 
 /**
  * Link export async function foo(){ fetch('.../path') } → exportHint=foo
+ * Also: const foo = () => $HTTP.getP(...) + export { foo }
  * Binding uses evidence line ∈ function body line range (avoids path substring collisions).
  */
 function bindLegacyExportHints(content, apis) {
   const unbound = apis.filter((a) => !a.exportHint);
   if (unbound.length === 0) return;
 
+  /** @type {Map<string, typeof apis>} */
+  const localNameToApis = new Map();
+
   function evidenceLine(api) {
     const n = Number(String(api.evidence || '').split(':').pop());
     return Number.isFinite(n) ? n : -1;
   }
 
-  function bindRange(exportName, startIdx, endIdx) {
+  function bindRange(exportName, startIdx, endIdx, asLocal) {
     const startLine = content.slice(0, startIdx).split(/\n/).length;
     const endLine = content.slice(0, endIdx).split(/\n/).length;
     for (const api of unbound) {
       if (api.exportHint) continue;
       const line = evidenceLine(api);
       if (line >= startLine && line <= endLine) {
-        api.exportHint = exportName;
+        if (asLocal) {
+          if (!localNameToApis.has(exportName)) localNameToApis.set(exportName, []);
+          localNameToApis.get(exportName).push(api);
+        } else {
+          api.exportHint = exportName;
+        }
       }
     }
   }
@@ -879,7 +1027,7 @@ function bindLegacyExportHints(content, apis) {
     // body is the block content; locate its span in content
     const bodyStart = content.indexOf(body, fm.index);
     const bodyEnd = bodyStart >= 0 ? bodyStart + body.length : fm.index + fm[0].length;
-    bindRange(exportName, fm.index, bodyEnd);
+    bindRange(exportName, fm.index, bodyEnd, false);
   }
 
   const arrowRe =
@@ -897,7 +1045,68 @@ function bindLegacyExportHints(content, apis) {
       const m = trimmed.match(/^[^;\n]+/);
       bodyEnd = fm.index + fm[0].length + (after.length - trimmed.length) + (m ? m[0].length : 0);
     }
-    bindRange(exportName, fm.index, bodyEnd);
+    bindRange(exportName, fm.index, bodyEnd, false);
+  }
+
+  // Non-export: const getList = (data) => $HTTP.getP(...)  (possibly multi-line)
+  const localArrowRe =
+    /(?:^|[\n;])\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[\w]+)\s*(?::\s*[^=]+)?\s*=>/g;
+  while ((fm = localArrowRe.exec(content))) {
+    // Skip if this was already an export const (handled above)
+    const before = content.slice(Math.max(0, fm.index - 12), fm.index + fm[0].length);
+    if (/\bexport\s+(?:const|let|var)\s+\w+/.test(before)) continue;
+    const localName = fm[1];
+    const after = content.slice(fm.index + fm[0].length);
+    const trimmed = after.replace(/^\s*/, '');
+    let bodyEnd = fm.index + fm[0].length;
+    if (trimmed.startsWith('{')) {
+      const abs = fm.index + fm[0].length + (after.length - trimmed.length);
+      const body = extractBalancedBlock(content, abs);
+      if (body) bodyEnd = abs + body.length + 2;
+    } else {
+      // Expression body may span lines until `;` or blank-ish next statement
+      const m = trimmed.match(/^[\s\S]*?(?=;|\n\s*(?:const|let|var|function|export|\/\*|\/\/)|\n\s*$)/);
+      bodyEnd =
+        fm.index +
+        fm[0].length +
+        (after.length - trimmed.length) +
+        (m ? m[0].length : Math.min(trimmed.length, 400));
+    }
+    bindRange(localName, fm.index, bodyEnd, true);
+  }
+
+  // Non-export function declarations
+  const localFnRe = /(?:^|[\n;])\s*(?:async\s+)?function\s+(\w+)\s*\(/g;
+  while ((fm = localFnRe.exec(content))) {
+    const before = content.slice(Math.max(0, fm.index - 12), fm.index + fm[0].length);
+    if (/\bexport\s+(?:async\s+)?function\s+\w+/.test(before)) continue;
+    const localName = fm[1];
+    const openParen = fm.index + fm[0].length - 1;
+    const body = extractFunctionBodyAfterParen(content, openParen);
+    if (!body) continue;
+    const bodyStart = content.indexOf(body, fm.index);
+    const bodyEnd = bodyStart >= 0 ? bodyStart + body.length : fm.index + fm[0].length;
+    bindRange(localName, fm.index, bodyEnd, true);
+  }
+
+  // export { a, b as c } — bind exportHint by local name (all host copies share hint)
+  const exportListRe = /export\s*\{([^}]+)\}/g;
+  let em;
+  while ((em = exportListRe.exec(content))) {
+    const after = content.slice(em.index + em[0].length);
+    if (/^\s*from\s*['"`]/.test(after)) continue;
+    const specs = em[1].split(',').map((s) => s.trim()).filter(Boolean);
+    for (const spec of specs) {
+      const parts = spec.split(/\s+as\s+/);
+      const localName = parts[0].trim();
+      const exportName = parts[1]?.trim() || localName;
+      const hits = localNameToApis.get(localName) || [];
+      for (const hit of hits) {
+        if (!hit.exportHint) hit.exportHint = exportName;
+      }
+      // Also: already-unbound apis whose evidence is near a const localName assignment
+      // covered via localNameToApis above.
+    }
   }
 }
 
@@ -945,13 +1154,8 @@ function dedupe(apis) {
   return list;
 }
 
-function loadInferConfig() {
-  try {
-    const file = path.join(__dirname, '..', 'config', 'default.infer.json');
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return { denyHostSuffixes: [], denyHostKeywords: [] };
-  }
+function loadInferConfig(projectDir) {
+  return require('../lib/infer/load-infer-config').loadInferConfig(projectDir);
 }
 
 function isDeniedHost(host, cfg) {
@@ -987,9 +1191,11 @@ function loadAdapter(name) {
 
 function inferApiUsage(projectDir, opts = {}) {
   const serviceBases = discoverServiceBases(projectDir);
-  const inferCfg = loadInferConfig();
+  const inferCfg = loadInferConfig(projectDir);
   const adapter = opts.adapter ? loadAdapter(opts.adapter) : null;
   const files = walk(projectDir);
+  const hostVars = discoverHostVarAssignments(projectDir, files);
+  const wrappers = inferCfg.httpWrappers || [];
 
   // mtime cache (skip when forceRefresh)
   if (!opts.forceRefresh) {
@@ -1046,9 +1252,9 @@ function inferApiUsage(projectDir, opts = {}) {
         }
         all.push(...extractCreateRequestApis(scriptContent, rel, serviceBases));
         all.push(...extractRequestKeyUriApis(scriptContent, rel, serviceBases));
-        all.push(...extractLegacyApis(scriptContent, rel, serviceBases));
+        all.push(...extractLegacyApis(scriptContent, rel, serviceBases, hostVars, wrappers));
         if (adapter && typeof adapter.extract === 'function') {
-          const extra = adapter.extract({ content: scriptContent, rel, serviceBases }) || [];
+          const extra = adapter.extract({ content: scriptContent, rel, serviceBases, hostVars, wrappers }) || [];
           all.push(...extra);
         }
       }
@@ -1065,9 +1271,9 @@ function inferApiUsage(projectDir, opts = {}) {
 
     all.push(...extractCreateRequestApis(content, rel, serviceBases));
     all.push(...extractRequestKeyUriApis(content, rel, serviceBases));
-    all.push(...extractLegacyApis(content, rel, serviceBases));
+    all.push(...extractLegacyApis(content, rel, serviceBases, hostVars, wrappers));
     if (adapter && typeof adapter.extract === 'function') {
-      const extra = adapter.extract({ content, rel, serviceBases }) || [];
+      const extra = adapter.extract({ content, rel, serviceBases, hostVars, wrappers }) || [];
       all.push(...extra);
     }
   }
@@ -1082,7 +1288,7 @@ function inferApiUsage(projectDir, opts = {}) {
   if (opts.withUsageIo !== false) {
     try {
       const { enrichApisWithUsageIo } = require('./infer-usage-io');
-      enriched = enrichApisWithUsageIo(projectDir, filtered);
+      enriched = enrichApisWithUsageIo(projectDir, filtered, { inferCfg });
     } catch (err) {
       console.warn(
         `[mock-skill] usage-io enrich skipped: ${err.message}`,
@@ -1094,6 +1300,10 @@ function inferApiUsage(projectDir, opts = {}) {
   Object.defineProperty(enriched, 'meta', {
     value: {
       serviceBases,
+      hostVars: [...hostVars.entries()].map(([k, v]) => ({
+        key: k,
+        hosts: v.map((h) => h.host),
+      })),
       gatewayFilteredCount,
       adapter: adapter ? adapter.name || opts.adapter : null,
       cacheHit: false,
@@ -1118,12 +1328,15 @@ function inferApiUsage(projectDir, opts = {}) {
 module.exports = {
   inferApiUsage,
   discoverServiceBases,
+  discoverHostVarAssignments,
   joinPrefix,
   isGatewayOnlyPath,
   pathDepth,
   extractCreateRequestApis,
   extractRequestKeyUriApis,
   extractLegacyApis,
+  parseHostUrlLiteral,
+  httpWrapperMethod,
   loadAdapter,
 };
 

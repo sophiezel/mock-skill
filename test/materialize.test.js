@@ -96,6 +96,14 @@ test('materialize: array of objects', () => {
   assert.equal(typeof out[0].id, 'number');
 });
 
+test('materialize: empty array item props → []', () => {
+  const out = materialize({
+    type: 'array',
+    item: { type: 'object', props: {} },
+  });
+  assert.deepEqual(out, []);
+});
+
 test('materialize: enum string picks first', () => {
   const shape = { type: 'string', enums: ['pending', 'paid'] };
   assert.equal(materialize(shape), 'pending');

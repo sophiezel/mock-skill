@@ -53,9 +53,9 @@ mock-skill init --task=TR-1234 --related-from=./docs/req.md
 mock-skill init --adapter=create-request   # 可选：叠加 adapters/<name>.js
 ```
 
-默认扫描 `fetch` / `axios` / 字符串 URL；`createRequest` 亦内置。自定义封装放 `adapters/`，用 `--adapter=` 启用。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
+默认扫描 `fetch` / `axios` / `$HTTP` 等注册表封装 / 字符串 URL；`createRequest` 亦内置。项目差异写 `<project>/.mock-skill/infer.json`（`httpWrappers` / `pathAliases`），或用 `--adapter=` 叠加 `adapters/`。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
 
-**样例数据**：init 只根据用法倒推出的**接口字段**生成占位值（faker）；**不发明字段**。真实值请 `session` 走主路径后 `mock-skill capture-merge` 回灌。噪音路径（`e2e/`、`src/mock/`、无 request 上下文的 pathLiteral）会被过滤；`no_export_symbol` 且空 shape 不渲空 handler（`skippedEmpty`）。
+**样例数据（静态优先）**：init 根据用法倒推出的**接口字段**生成占位值（faker）；**不发明字段**。成功主看 `usageBackedCount`。`capture-merge` 功能完整保留，用于补静态缺口与真实值回灌（非 init 前置条件）。噪音路径会被过滤；`no_export_symbol` 且空 shape 不渲空 handler（`skippedEmpty`）。
 
 数据落在（扁平，一项目一份）：
 

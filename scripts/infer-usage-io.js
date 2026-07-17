@@ -67,7 +67,7 @@ function collectObjectLiteralKeys(node) {
 }
 
 function getPropertyAccessChain(node) {
-  // Returns ['detail','foo','bar'] from detail.foo.bar
+  // Returns ['detail','foo','bar'] from detail.foo.bar (incl. optional chaining)
   const parts = [];
   let cur = node;
   while (cur) {
@@ -77,8 +77,13 @@ function getPropertyAccessChain(node) {
       cur = cur.getExpression();
     } else if (kind === 'ElementAccessExpression') {
       return null; // dynamic — gap
+    } else if (kind === 'NonNullExpression' || kind === 'ParenthesizedExpression') {
+      cur = cur.getExpression?.() || cur.getChildAtIndex?.(0);
     } else if (kind === 'Identifier') {
       parts.unshift(cur.getText());
+      break;
+    } else if (kind === 'ThisExpression' || kind === 'ThisKeyword') {
+      parts.unshift('this');
       break;
     } else if (kind === 'CallExpression' || kind === 'AwaitExpression') {
       break;
@@ -86,7 +91,7 @@ function getPropertyAccessChain(node) {
       break;
     }
   }
-  return parts;
+  return parts.length ? parts : null;
 }
 
 const ENVELOPE_KEYS = new Set(['code', 'message', 'msg', 'success', 'error']);
@@ -180,6 +185,8 @@ function getPropertyAccessRootIdentifier(node) {
       cur = cur.getExpression();
     } else if (kind === 'Identifier') {
       return cur;
+    } else if (kind === 'ThisExpression' || kind === 'ThisKeyword') {
+      return null; // this.foo — use chain alias, not identifier root
     } else {
       return null;
     }
@@ -298,10 +305,178 @@ function walkVue(dir, out = []) {
 }
 
 /**
+ * Collect local binding names for `exportName` from import { ... } in a source file.
+ * @param {object} sf - ts-morph SourceFile
+ * @param {string} exportName
+ * @returns {Set<string>}
+ */
+function collectImportLocalNames(sf, exportName) {
+  const locals = new Set();
+  try {
+    for (const imp of sf.getImportDeclarations()) {
+      for (const n of imp.getNamedImports()) {
+        if (n.getName() === exportName) {
+          locals.add(n.getAliasNode()?.getText() || n.getName());
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  // Text fallback when ts-morph named imports fail on odd syntax
+  if (locals.size === 0) {
+    const text = sf.getFullText();
+    const re = /import\s*\{([^}]+)\}\s*from\s*['"`][^'"`]+['"`]/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const specs = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+      for (const spec of specs) {
+        const parts = spec.split(/\s+as\s+/);
+        const imported = parts[0].trim();
+        const local = (parts[1] || parts[0]).trim();
+        if (imported === exportName && /^[A-Za-z_$][\w$]*$/.test(local)) {
+          locals.add(local);
+        }
+      }
+    }
+  }
+  return locals;
+}
+
+/**
+ * Find CallExpressions for exportName via import-name matching (no module resolution).
+ * @returns {Array<{ call: object, sf: object, ref: object }>}
+ */
+function findImportNameCallExpressions(sourceFiles, exportName, SyntaxKind) {
+  const out = [];
+  for (const sf of sourceFiles) {
+    const text = sf.getFullText();
+    if (!text.includes(exportName)) continue;
+    const locals = collectImportLocalNames(sf, exportName);
+    /** @type {Set<string>} namespace / default import local names */
+    const namespaces = new Set();
+    try {
+      for (const imp of sf.getImportDeclarations()) {
+        const ns = imp.getNamespaceImport?.();
+        if (ns) namespaces.add(ns.getText());
+        const def = imp.getDefaultImport?.();
+        if (def) namespaces.add(def.getText());
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const expr = call.getExpression();
+        if (!expr) continue;
+        if (
+          expr.getKindName() === 'Identifier' &&
+          locals.has(expr.getText())
+        ) {
+          out.push({ call, sf, ref: expr });
+          continue;
+        }
+        // import * as svc / import svc from → svc.exportName(
+        if (
+          expr.getKindName() === 'PropertyAccessExpression' &&
+          expr.getName() === exportName
+        ) {
+          const obj = expr.getExpression();
+          if (
+            obj?.getKindName() === 'Identifier' &&
+            namespaces.has(obj.getText())
+          ) {
+            out.push({ call, sf, ref: expr });
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
+}
+
+/**
+ * From assignment `this.a.b = res.data.x` / `obj.y = data.z`, collect shape fields
+ * when RHS chains through a registered receiver. Also handles `res && res.data`.
+ */
+function collectAssignmentShapes(sf, SyntaxKind, receiverDefs, shape, responsePaths) {
+  try {
+    for (const bin of sf.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+      const op = bin.getOperatorToken()?.getText?.();
+      if (op !== '=') continue;
+      const right = bin.getRight();
+      if (!right) continue;
+      for (const pa of findPropertyAccessesInExpr(right, SyntaxKind)) {
+        const chain = getPropertyAccessChain(pa);
+        const rootId = getPropertyAccessRootIdentifier(pa);
+        if (!chain || !rootId || !isRegisteredReceiver(rootId, receiverDefs)) continue;
+        const rest = unwrapDataPrefix(chain);
+        if (!rest.length) continue;
+        if (shouldRejectEnvelopeField(chain, rest)) continue;
+        const copy = [...rest];
+        if (['map', 'filter', 'forEach', 'length', 'find'].includes(copy[copy.length - 1])) {
+          copy.pop();
+          if (copy.length) {
+            const leaf = ensureProp(shape, copy);
+            leaf.type = 'array';
+            if (!leaf.item) leaf.item = { type: 'object', props: {} };
+          } else {
+            markShapeAsArray(shape);
+          }
+        } else {
+          ensureProp(shape, copy);
+          responsePaths.push(copy.join('.'));
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Collect PropertyAccessExpression nodes under expr, descending through &&/||/??/(). */
+function findPropertyAccessesInExpr(expr, SyntaxKind) {
+  const out = [];
+  if (!expr) return out;
+  const kind = expr.getKindName();
+  if (kind === 'PropertyAccessExpression') {
+    out.push(expr);
+    return out;
+  }
+  if (kind === 'BinaryExpression') {
+    const op = expr.getOperatorToken?.()?.getText?.();
+    if (op === '&&' || op === '||' || op === '??') {
+      out.push(...findPropertyAccessesInExpr(expr.getLeft(), SyntaxKind));
+      out.push(...findPropertyAccessesInExpr(expr.getRight(), SyntaxKind));
+    }
+    return out;
+  }
+  if (
+    kind === 'ParenthesizedExpression' ||
+    kind === 'AwaitExpression' ||
+    kind === 'NonNullExpression'
+  ) {
+    return findPropertyAccessesInExpr(expr.getExpression?.(), SyntaxKind);
+  }
+  return out;
+}
+
+function markShapeAsArray(shape) {
+  if (!shape || typeof shape !== 'object') return;
+  shape.type = 'array';
+  if (!shape.item) shape.item = { type: 'object', props: {} };
+  if (!shape.item.props) shape.item.props = {};
+}
+
+/**
  * @param {string} projectDir
  * @param {Array} apis
+ * @param {object} [opts]
+ * @param {object} [opts.inferCfg]
  */
-function enrichApisWithUsageIo(projectDir, apis) {
+function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
   let Project;
   let SyntaxKind;
   let ScriptTarget;
@@ -314,26 +489,47 @@ function enrichApisWithUsageIo(projectDir, apis) {
     throw new Error(`ts-morph not installed: ${e.message}`);
   }
 
+  const { loadInferConfig } = require('../lib/infer/load-infer-config');
+  const { resolveCompilerPathOptions } = require('../lib/infer/path-aliases');
+  const inferCfg = opts.inferCfg || loadInferConfig(projectDir);
+  const pathOpts = resolveCompilerPathOptions(projectDir, inferCfg);
+
   const tsconfig = path.join(projectDir, 'tsconfig.json');
-  const project = fs.existsSync(tsconfig)
+  const jsconfig = path.join(projectDir, 'jsconfig.json');
+  const hasTsConfig = fs.existsSync(tsconfig);
+  const hasJsConfig = fs.existsSync(jsconfig);
+
+  const sharedCompilerOptions = {
+    allowJs: true,
+    checkJs: false,
+    noEmit: true,
+    baseUrl: pathOpts.baseUrl,
+    paths: pathOpts.paths,
+  };
+
+  const project = hasTsConfig
     ? new Project({
         tsConfigFilePath: tsconfig,
         skipAddingFilesFromTsConfig: false,
-        compilerOptions: { allowJs: true, checkJs: false, noEmit: true },
+        compilerOptions: sharedCompilerOptions,
       })
-    : new Project({
-        compilerOptions: {
-          allowJs: true,
-          checkJs: false,
-          jsx: 2, // JsxEmit.React
-          noEmit: true,
-          target: ScriptTarget.ES2020,
-          module: ModuleKind.ESNext,
-          moduleResolution: ModuleResolutionKind.NodeJs,
-        },
-      });
+    : hasJsConfig
+      ? new Project({
+          tsConfigFilePath: jsconfig,
+          skipAddingFilesFromTsConfig: false,
+          compilerOptions: sharedCompilerOptions,
+        })
+      : new Project({
+          compilerOptions: {
+            ...sharedCompilerOptions,
+            jsx: 2, // JsxEmit.React
+            target: ScriptTarget.ES2020,
+            module: ModuleKind.ESNext,
+            moduleResolution: ModuleResolutionKind.NodeJs,
+          },
+        });
 
-  if (!fs.existsSync(tsconfig)) {
+  if (!hasTsConfig && !hasJsConfig) {
     const src = path.join(projectDir, 'src');
     if (fs.existsSync(src)) {
       project.addSourceFilesAtPaths([
@@ -470,8 +666,10 @@ function enrichApisWithUsageIo(projectDir, apis) {
           return;
         }
         if (leftOrDecl.getKindName() === 'Identifier') {
-          const defs = leftOrDecl.getDefinitionNodes?.() || [];
-          if (defs.length) {
+          // Always register the assignment target itself (covers `let res; res = await api()`)
+          registerReceiver(localReceivers, leftOrDecl);
+          try {
+            const defs = leftOrDecl.getDefinitionNodes?.() || [];
             for (const d of defs) {
               if (d.getNameNode) {
                 const nn = d.getNameNode();
@@ -484,8 +682,8 @@ function enrichApisWithUsageIo(projectDir, apis) {
                 registerReceiver(localReceivers, d);
               }
             }
-          } else {
-            registerReceiver(localReceivers, leftOrDecl);
+          } catch {
+            /* ignore */
           }
         }
       } catch {
@@ -507,82 +705,101 @@ function enrichApisWithUsageIo(projectDir, apis) {
       gaps.add('ref_lookup_failed');
     }
 
+    function processCallExpression(call, refSf) {
+      if (!call || call.getKindName() !== 'CallExpression') return;
+      hasCall = true;
+      const localReceivers = fileReceivers(refSf);
+      const args = call.getArguments();
+      for (const arg of args) {
+        if (arg.getKindName() === 'ObjectLiteralExpression') {
+          for (const k of collectObjectLiteralKeys(arg)) {
+            const method = (relatedApis[0].method || 'GET').toUpperCase();
+            if (method === 'GET' || method === 'DELETE') queryKeys.add(k);
+            else bodyKeys.add(k);
+          }
+        } else if (arg.getKindName() === 'Identifier') {
+          try {
+            const defs = arg.getDefinitionNodes?.() || [];
+            for (const d of defs) {
+              if (d.getKindName() === 'VariableDeclaration') {
+                const i = d.getInitializer();
+                if (i && i.getKindName() === 'ObjectLiteralExpression') {
+                  for (const k of collectObjectLiteralKeys(i)) {
+                    const method = (relatedApis[0].method || 'GET').toUpperCase();
+                    if (method === 'GET') queryKeys.add(k);
+                    else bodyKeys.add(k);
+                  }
+                }
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        } else if (arg.getKindName() === 'ElementAccessExpression') {
+          dynamicKeyRisk = true;
+          gaps.add('dynamic_key');
+        }
+      }
+
+      const callParent = call.getParent();
+      if (
+        callParent &&
+        callParent.getKindName() === 'PropertyAccessExpression' &&
+        callParent.getName() === 'then'
+      ) {
+        const thenCall = callParent.getParent();
+        if (thenCall && thenCall.getKindName() === 'CallExpression') {
+          const cb = thenCall.getArguments()[0];
+          if (
+            cb &&
+            (cb.getKindName() === 'ArrowFunction' ||
+              cb.getKindName() === 'FunctionExpression')
+          ) {
+            const params = cb.getParameters();
+            if (params[0]) {
+              collectBindingFromParam(
+                params[0],
+                localReceivers,
+                shape,
+                responsePaths,
+              );
+            }
+          }
+        }
+      }
+
+      let walk = call.getParent();
+      if (walk && walk.getKindName() === 'AwaitExpression') walk = walk.getParent();
+      if (walk && walk.getKindName() === 'BinaryExpression') {
+        const left = walk.getLeft?.() || walk.getChildren()[0];
+        registerAssignmentReceiver(localReceivers, left);
+      }
+      if (walk && walk.getKindName() === 'VariableDeclaration') {
+        registerAssignmentReceiver(localReceivers, walk);
+      }
+    }
+
     for (const ref of refs) {
       const parent = ref.getParent();
       if (!parent) continue;
-
-      // CallExpression: getTaskDetail(...)
       let call = parent;
       if (call.getKindName() === 'PropertyAccessExpression') {
         call = call.getParent();
       }
       if (call && call.getKindName() === 'CallExpression') {
-        hasCall = true;
-        const localReceivers = fileReceivers(ref.getSourceFile());
-        const args = call.getArguments();
-        for (const arg of args) {
-          if (arg.getKindName() === 'ObjectLiteralExpression') {
-            for (const k of collectObjectLiteralKeys(arg)) {
-              // Prefer body for POST
-              const method = (relatedApis[0].method || 'GET').toUpperCase();
-              if (method === 'GET' || method === 'DELETE') queryKeys.add(k);
-              else bodyKeys.add(k);
-            }
-          } else if (arg.getKindName() === 'Identifier') {
-            // Try to resolve variable init
-            try {
-              const defs = arg.getDefinitionNodes?.() || [];
-              for (const d of defs) {
-                // VariableDeclaration
-                if (d.getKindName() === 'VariableDeclaration') {
-                  const i = d.getInitializer();
-                  if (i && i.getKindName() === 'ObjectLiteralExpression') {
-                    for (const k of collectObjectLiteralKeys(i)) {
-                      const method = (relatedApis[0].method || 'GET').toUpperCase();
-                      if (method === 'GET') queryKeys.add(k);
-                      else bodyKeys.add(k);
-                    }
-                  }
-                }
-              }
-            } catch {
-              /* ignore */
-            }
-          } else if (arg.getKindName() === 'ElementAccessExpression') {
-            dynamicKeyRisk = true;
-            gaps.add('dynamic_key');
-          }
-        }
+        processCallExpression(call, ref.getSourceFile());
+      }
+    }
 
-        // .then((res) => ...) or .then(({ data }) => ...)
-        const callParent = call.getParent();
-        if (
-          callParent &&
-          callParent.getKindName() === 'PropertyAccessExpression' &&
-          callParent.getName() === 'then'
-        ) {
-          const thenCall = callParent.getParent();
-          if (thenCall && thenCall.getKindName() === 'CallExpression') {
-            const cb = thenCall.getArguments()[0];
-            if (cb && (cb.getKindName() === 'ArrowFunction' || cb.getKindName() === 'FunctionExpression')) {
-              const params = cb.getParameters();
-              if (params[0]) {
-                collectBindingFromParam(params[0], localReceivers, shape, responsePaths);
-              }
-            }
-          }
-        }
-
-        // await getXxx() assigned — register definition nodes, not bare names
-        let walk = call.getParent();
-        if (walk && walk.getKindName() === 'AwaitExpression') walk = walk.getParent();
-        if (walk && walk.getKindName() === 'BinaryExpression') {
-          const left = walk.getLeft?.() || walk.getChildren()[0];
-          registerAssignmentReceiver(localReceivers, left);
-        }
-        if (walk && walk.getKindName() === 'VariableDeclaration') {
-          registerAssignmentReceiver(localReceivers, walk);
-        }
+    // Import-name fallback when @/ ~/ aliases break findReferences
+    if (!hasCall) {
+      const fallback = findImportNameCallExpressions(
+        sourceFiles,
+        exportName,
+        SyntaxKind,
+      );
+      for (const { call, sf } of fallback) {
+        processCallExpression(call, sf);
       }
     }
 
@@ -592,11 +809,30 @@ function enrichApisWithUsageIo(projectDir, apis) {
     for (const ref of refs) {
       importFiles.add(ref.getSourceFile());
     }
+    if (hasCall) {
+      for (const sf of sourceFiles) {
+        if (collectImportLocalNames(sf, exportName).size) importFiles.add(sf);
+      }
+    }
 
     for (const sf of importFiles) {
       const text = sf.getFullText();
       if (!text.includes(exportName)) continue;
       const receiverDefs = fileReceivers(sf);
+
+      // Destructuring first so nested receivers exist before PA scan
+      // (const { data } = res → data?.total)
+      for (const vd of sf.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+        const nameNode = vd.getNameNode();
+        if (!nameNode || nameNode.getKindName() !== 'ObjectBindingPattern') continue;
+        const init = vd.getInitializer();
+        const srcId = resolveReceiverInit(init, receiverDefs);
+        if (!srcId) continue;
+        const srcName = srcId.getText();
+        for (const be of nameNode.getElements()) {
+          collectBindingElement(be, [srcName], receiverDefs, shape, responsePaths);
+        }
+      }
 
       // Collect property accesses — match by definition node, not name string
       for (const pa of sf.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
@@ -635,16 +871,40 @@ function enrichApisWithUsageIo(projectDir, apis) {
         }
       }
 
-      // Destructuring: const { a, b } = data  /  const { x } = res.data
-      for (const vd of sf.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
-        const nameNode = vd.getNameNode();
-        if (!nameNode || nameNode.getKindName() !== 'ObjectBindingPattern') continue;
-        const init = vd.getInitializer();
-        const srcId = resolveReceiverInit(init, receiverDefs);
-        if (!srcId) continue;
-        const srcName = srcId.getText();
-        for (const be of nameNode.getElements()) {
-          collectBindingElement(be, [srcName], receiverDefs, shape, responsePaths);
+      // this.foo = res.data.bar — reinforce field collection from assignments
+      collectAssignmentShapes(sf, SyntaxKind, receiverDefs, shape, responsePaths);
+      // L3 BindingGraph: alias propagation + array/item from script AST
+      const {
+        applyScriptBindingGraph,
+        applyTemplateEvents,
+      } = require('../lib/infer/script-binding');
+      const graph = applyScriptBindingGraph({
+        sf,
+        SyntaxKind,
+        receiverDefs,
+        shape,
+        responsePaths,
+        getPropertyAccessChain,
+        getPropertyAccessRootIdentifier,
+        isRegisteredReceiver,
+        unwrapDataPrefix,
+        isUnderDataPath,
+        shouldRejectEnvelopeField,
+        registerReceiver,
+      });
+      // L2 Vue template AST → same BindingGraph (when virtual script from .vue)
+      const { vuePathFromVirtualScript } = require('../lib/vue-script');
+      const {
+        collectVueTemplateBindingEvents,
+      } = require('../lib/infer/vue-template-ast');
+      const vueAbs = vuePathFromVirtualScript(sf.getFilePath());
+      if (vueAbs && fs.existsSync(vueAbs)) {
+        try {
+          const vueSrc = fs.readFileSync(vueAbs, 'utf8');
+          const tplEvents = collectVueTemplateBindingEvents(vueSrc);
+          applyTemplateEvents(graph, tplEvents);
+        } catch {
+          /* ignore template parse errors */
         }
       }
 
@@ -734,11 +994,22 @@ function enrichApisWithUsageIo(projectDir, apis) {
       }
     }
 
-    if (!hasCall && refs.length <= 1) {
+    if (!hasCall) {
       gaps.add('no_callsite');
     }
-    if (!responsePaths.length && !Object.keys(shape.props || {}).length) {
+    const hasObjProps = Object.keys(shape.props || {}).length > 0;
+    const hasItemProps =
+      shape.type === 'array' && Object.keys(shape.item?.props || {}).length > 0;
+    const isArrayPayload = shape.type === 'array';
+    if (
+      !responsePaths.length &&
+      !hasObjProps &&
+      !hasItemProps &&
+      !isArrayPayload
+    ) {
       gaps.add('no_property_access');
+    } else {
+      gaps.delete('no_property_access');
     }
 
     // Merge into related APIs
@@ -769,7 +1040,12 @@ function enrichApisWithUsageIo(projectDir, apis) {
       api.queryHints = [...queryKeys];
       api.bodyHints = [...bodyKeys];
       api.responseShape = shape;
-      api.responseHints = Object.keys(shape.props || {});
+      api.responseHints = [
+        ...Object.keys(shape.props || {}),
+        ...(shape.type === 'array'
+          ? Object.keys(shape.item?.props || {}).map((k) => `[].${k}`)
+          : []),
+      ];
       api.coverage = coverage;
       api.confidence =
         coverage.response.confidence === 'high' ||
@@ -813,7 +1089,13 @@ function mergeEnumEntries(entries) {
   return [...map.values()];
 }
 
-module.exports = { enrichApisWithUsageIo, emptyShape, ensureProp };
+module.exports = {
+  enrichApisWithUsageIo,
+  emptyShape,
+  ensureProp,
+  collectImportLocalNames,
+  findImportNameCallExpressions,
+};
 
 if (require.main === module) {
   const { inferApiUsage } = require('./infer-api-usage');

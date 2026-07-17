@@ -67,7 +67,7 @@ test('generate force: prunes orphan handlers and contracts', () => {
   });
 });
 
-test('generate: empty + no_property_access is contract-only (no proxy rule)', () => {
+test('generate: empty + exportHint still materializes handler (no_property_access alone is not contract-only)', () => {
   withTempProject((slug) => {
     const roles = [
       {
@@ -86,15 +86,47 @@ test('generate: empty + no_property_access is contract-only (no proxy rule)', ()
       },
     ];
     const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
+    assert.equal(gen.skippedEmptyCount, 0);
+    assert.equal(gen.generated, 1);
+    const rules = JSON.parse(
+      fs.readFileSync(path.join(projectDataDir(slug), 'proxy-rules.json'), 'utf8'),
+    );
+    assert.equal(rules.length, 1, 'exportHint empty shape still enters proxy-rules');
+    assert.ok(
+      fs.existsSync(mockHandlerPath(slug, 'api.example.com', '/v1/addr/init')),
+      'handler should be rendered',
+    );
+  });
+});
+
+test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () => {
+  withTempProject((slug) => {
+    const roles = [
+      {
+        role: 'modify',
+        host: 'api.example.com',
+        path: '/v1/addr/orphan',
+        method: 'GET',
+        exportHint: null,
+        responseShape: { type: 'object', props: {} },
+        coverage: {
+          request: { keysFound: [], confidence: 'low' },
+          response: { pathsFound: [], confidence: 'low' },
+          enums: [],
+          gaps: ['no_export_symbol'],
+        },
+      },
+    ];
+    const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
     assert.equal(gen.skippedEmptyCount, 1);
     const rules = JSON.parse(
       fs.readFileSync(path.join(projectDataDir(slug), 'proxy-rules.json'), 'utf8'),
     );
-    assert.equal(rules.length, 0, 'empty+no_property_access must not enter proxy-rules');
-    const key = apiKey({ host: 'api.example.com', method: 'GET', path: '/v1/addr/init' });
+    assert.equal(rules.length, 0, 'empty+no_export_symbol must not enter proxy-rules');
+    const key = apiKey({ host: 'api.example.com', method: 'GET', path: '/v1/addr/orphan' });
     assert.ok(fs.existsSync(contractPath(slug, key)), 'contract should still be written');
     assert.ok(
-      !fs.existsSync(mockHandlerPath(slug, 'api.example.com', '/v1/addr/init')),
+      !fs.existsSync(mockHandlerPath(slug, 'api.example.com', '/v1/addr/orphan')),
       'handler should not be rendered',
     );
   });

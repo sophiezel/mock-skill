@@ -134,11 +134,12 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
 
   const dataSample = materialize(shape);
   const hasData =
-    dataSample &&
-    typeof dataSample === 'object' &&
-    (Array.isArray(dataSample)
-      ? dataSample.length > 0
-      : Object.keys(dataSample).length > 0);
+    (shape && shape.type === 'array') ||
+    (dataSample &&
+      typeof dataSample === 'object' &&
+      (Array.isArray(dataSample)
+        ? dataSample.length > 0
+        : Object.keys(dataSample).length > 0));
 
   const enumCases = buildEnumCases(shape, dataSample);
   const coverage = roleEntry.coverage || {
@@ -498,24 +499,36 @@ function generateMocks({
   let skippedEmptyCount = 0;
   let prunedHandlers = 0;
   let prunedContracts = 0;
+  /** @type {Set<string>} unique exportHint (or apiKey fallback) with usage-backed data */
+  const usageBackedHintSet = new Set();
+  /** @type {Set<string>} unique exportHint (or apiKey fallback) with empty data */
+  const emptyDataHintSet = new Set();
   const gapApis = [];
   const blocked = [];
   const rules = [];
   /** Contracts written this round (including contract-only skips) */
   const keepContractKeys = new Set();
 
+  function trackHintCoverage(contract, key) {
+    const hint = contract.exportHint || key;
+    if (contract.response?.source === 'usage') {
+      usageBackedCount++;
+      usageBackedHintSet.add(hint);
+    } else {
+      emptyDataCount++;
+      emptyDataHintSet.add(hint);
+    }
+  }
+
   /**
-   * Empty shape + weak usage signal → contract only (no handler / proxy rule).
-   * Gaps: no_export_symbol | no_property_access | no_callsite
+   * Empty shape + unbound export → contract only (no handler / proxy rule).
+   * Having exportHint (no no_export_symbol) still materializes empty data:{} handlers;
+   * real fields come from usage-io or capture-merge.
    */
   function isEmptyContractOnly(contract) {
     if (contract.response?.source !== 'empty') return false;
     const gaps = contract.coverage?.gaps || [];
-    return (
-      gaps.includes('no_export_symbol') ||
-      gaps.includes('no_property_access') ||
-      gaps.includes('no_callsite')
-    );
+    return gaps.includes('no_export_symbol');
   }
 
   // Skip roles that are still gateway-only
@@ -562,8 +575,7 @@ function generateMocks({
         `${JSON.stringify(contract, null, 2)}\n`,
       );
       keepContractKeys.add(key);
-      if (contract.response?.source === 'usage') usageBackedCount++;
-      else emptyDataCount++;
+      trackHintCoverage(contract, key);
       if (contract.coverage?.enums?.length) enumBackedCount++;
       if (contract.coverage?.gaps?.length) {
         gapApis.push({ id: key, gaps: contract.coverage.gaps });
@@ -590,8 +602,7 @@ function generateMocks({
       contract = mergeContract(existing.get(key), contract, { taskId });
     }
 
-    if (contract.response?.source === 'usage') usageBackedCount++;
-    else emptyDataCount++;
+    trackHintCoverage(contract, key);
     if (contract.coverage?.enums?.length) enumBackedCount++;
     if (contract.coverage?.gaps?.length) {
       gapApis.push({ id: key, gaps: contract.coverage.gaps });
@@ -667,6 +678,8 @@ function generateMocks({
     removedGateway,
     usageBackedCount,
     emptyDataCount,
+    usageBackedHints: usageBackedHintSet.size,
+    emptyDataHints: emptyDataHintSet.size,
     enumBackedCount,
     skippedEmptyCount,
     prunedHandlers,
