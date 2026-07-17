@@ -15,7 +15,7 @@ const { startMockServer } = require('../runtime/mock-server/server');
 const { startProxyServer } = require('../runtime/proxy/server');
 const { smokeCases } = require('./smoke-cases');
 const { setScenario } = require('./set-scenario');
-const { loadSession } = require('../lib/session-config');
+const { loadSession, saveSession } = require('../lib/session-config');
 const { projectDataDir, ensureProjectDirs } = require('../lib/paths');
 
 const FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'generic-web');
@@ -39,9 +39,16 @@ function reqProxy(proxyUrl, target) {
   });
 }
 
-async function verifyScenarioViaProxy(proxyUrl, rules, expectedStatus) {
+async function verifyScenarioViaProxy(proxyUrl, rules, expectedStatus, proxy) {
+  if (!rules || rules.length === 0) {
+    console.error('[fixture-smoke] no proxy rules — cannot verify scenario (fail closed)');
+    return 1;
+  }
+  if (proxy && typeof proxy.invalidateCasesCache === 'function') {
+    proxy.invalidateCasesCache();
+  }
   let fails = 0;
-  for (const rule of rules.slice(0, 6)) {
+  for (const rule of rules) {
     const target = `http://${rule.host}${rule.pathPrefix}`;
     try {
       const res = await reqProxy(proxyUrl, target);
@@ -52,6 +59,7 @@ async function verifyScenarioViaProxy(proxyUrl, rules, expectedStatus) {
         fails++;
       }
     } catch (e) {
+      console.error(`[fixture-smoke]   ${target} error: ${e.message}`);
       fails++;
     }
   }
@@ -71,7 +79,7 @@ async function run() {
     force: true,
   });
   console.log(
-    `[fixture-smoke] discovered=${initRes.apis.length} generated=${initRes.gen.generated}`,
+    `[fixture-smoke] discovered=${initRes.apis.length} generated=${initRes.gen.generated} skippedEmpty=${initRes.gen.skippedEmptyCount ?? '?'}`,
   );
 
   ensureProjectDirs(SLUG);
@@ -80,36 +88,38 @@ async function run() {
     throw new Error('no mocks generated for fixture');
   }
 
-  // 2. start mock on a random port
-  const port = 13900 + Math.floor(Math.random() * 1000);
+  const rulesPath = path.join(projectDataDir(SLUG), 'proxy-rules.json');
+  const rules = fs.existsSync(rulesPath)
+    ? JSON.parse(fs.readFileSync(rulesPath, 'utf8'))
+    : [];
+  if (rules.length === 0) {
+    throw new Error(
+      'proxy-rules.json empty after init — fixture pages must consume APIs so handlers materialize',
+    );
+  }
+
+  // 2. start mock on ephemeral port
   const srv = await startMockServer({
     mocksRoot,
     host: '127.0.0.1',
-    port,
+    port: 0,
   });
   console.log(`[fixture-smoke] mock listening ${srv.url}`);
 
   let failed = 0;
   try {
-    // 3. smoke --ci (uses session mock.host/port; override by saving session)
-    const { saveSession } = require('../lib/session-config');
-    saveSession(SLUG, { mock: { host: '127.0.0.1', port } });
+    saveSession(SLUG, { mock: { host: '127.0.0.1', port: srv.port } });
 
     const r1 = await smokeCases({ name: SLUG, ci: true, taskId: TASK_ID });
     failed += r1.failed;
-    console.log(`[fixture-smoke] smoke --ci: failed=${r1.failed}`);
+    console.log(`[fixture-smoke] smoke --ci: failed=${r1.failed} results=${r1.results.length}`);
 
-    // 4. set-scenario e2e-fault → default http_500; verify via PROXY (no client case header)
+    // 4. set-scenario e2e-fault → default http_500; verify via PROXY
     setScenario({ name: SLUG, scenario: 'e2e-fault' });
-    const proxyPort = port + 1;
-    const rulesPath = path.join(projectDataDir(SLUG), 'proxy-rules.json');
-    const rules = fs.existsSync(rulesPath)
-      ? JSON.parse(fs.readFileSync(rulesPath, 'utf8'))
-      : [];
     const casesLoader = () => loadSession(SLUG).cases || { default: 'success', active: {} };
     const proxy = await startProxyServer({
       host: '127.0.0.1',
-      port: proxyPort,
+      port: 0,
       mockTarget: srv.url,
       rules,
       cases: loadSession(SLUG).cases,
@@ -118,7 +128,7 @@ async function run() {
     });
     console.log(`[fixture-smoke] proxy listening ${proxy.url}`);
     try {
-      const faultFails = await verifyScenarioViaProxy(proxy.url, rules, 500);
+      const faultFails = await verifyScenarioViaProxy(proxy.url, rules, 500, proxy);
       if (faultFails > 0) {
         console.error(`[fixture-smoke] e2e-fault: ${faultFails} APIs did NOT return 500 via proxy`);
         failed += faultFails;
@@ -126,11 +136,9 @@ async function run() {
         console.log('[fixture-smoke] e2e-fault default=500 via proxy: verified');
       }
 
-      // 5. set-scenario e2e-happy → default success → 200 via proxy
       setScenario({ name: SLUG, scenario: 'e2e-happy' });
-      // clear casesLoader cache by waiting out TTL
-      await new Promise((r) => setTimeout(r, 1100));
-      const happyFails = await verifyScenarioViaProxy(proxy.url, rules, 200);
+      proxy.invalidateCasesCache();
+      const happyFails = await verifyScenarioViaProxy(proxy.url, rules, 200, proxy);
       if (happyFails > 0) {
         console.error(`[fixture-smoke] e2e-happy: ${happyFails} APIs did NOT return 200 via proxy`);
         failed += happyFails;

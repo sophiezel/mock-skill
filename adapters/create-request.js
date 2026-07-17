@@ -14,7 +14,7 @@
  * --adapter adds (or re-runs) a named extractor from adapters/*.js.
  */
 
-const { extractCreateRequestApis } = require('../scripts/infer-api-usage');
+const { extractCreateRequestApis } = require('../lib/infer/extract-create-request');
 
 module.exports = {
   name: 'create-request',

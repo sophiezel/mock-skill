@@ -24,9 +24,18 @@ function setScenario(opts = {}) {
     }
   }
   const defaultCase = scenario.default || cfg.cases?.default || 'success';
+  const stateful =
+    scenario.times || scenario.transitions || scenario.state
+      ? {
+          state: scenario.state || 'Started',
+          times: scenario.times || {},
+          transitions: scenario.transitions || null,
+        }
+      : null;
   saveSession(projectSlug, {
     scenario: name,
     cases: { active, default: defaultCase },
+    stateful,
   });
   appendAudit(projectSlug, {
     command: 'set-scenario',

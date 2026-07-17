@@ -38,6 +38,7 @@ async function initProject(opts = {}) {
   const apis = inferApiUsage(projectDir, {
     withUsageIo: true,
     adapter: opts.adapter || null,
+    forceRefresh: Boolean(opts.force),
   });
   const meta = apis.meta || {};
   // apis is array with meta property

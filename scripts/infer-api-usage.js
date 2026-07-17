@@ -838,7 +838,67 @@ function extractLegacyApis(content, file, serviceBases) {
     }
   }
 
+  // Bind export function/const wrappers that contain the URL/path (fetch/axios)
+  bindLegacyExportHints(content, apis);
+
   return apis;
+}
+
+/**
+ * Link export async function foo(){ fetch('.../path') } → exportHint=foo
+ * Binding uses evidence line ∈ function body line range (avoids path substring collisions).
+ */
+function bindLegacyExportHints(content, apis) {
+  const unbound = apis.filter((a) => !a.exportHint);
+  if (unbound.length === 0) return;
+
+  function evidenceLine(api) {
+    const n = Number(String(api.evidence || '').split(':').pop());
+    return Number.isFinite(n) ? n : -1;
+  }
+
+  function bindRange(exportName, startIdx, endIdx) {
+    const startLine = content.slice(0, startIdx).split(/\n/).length;
+    const endLine = content.slice(0, endIdx).split(/\n/).length;
+    for (const api of unbound) {
+      if (api.exportHint) continue;
+      const line = evidenceLine(api);
+      if (line >= startLine && line <= endLine) {
+        api.exportHint = exportName;
+      }
+    }
+  }
+
+  const fnRe = /export\s+(?:async\s+)?function\s+(\w+)\s*\(/g;
+  let fm;
+  while ((fm = fnRe.exec(content))) {
+    const exportName = fm[1];
+    const openParen = fm.index + fm[0].length - 1;
+    const body = extractFunctionBodyAfterParen(content, openParen);
+    if (!body) continue;
+    // body is the block content; locate its span in content
+    const bodyStart = content.indexOf(body, fm.index);
+    const bodyEnd = bodyStart >= 0 ? bodyStart + body.length : fm.index + fm[0].length;
+    bindRange(exportName, fm.index, bodyEnd);
+  }
+
+  const arrowRe =
+    /export\s+(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[\w]+)\s*(?::\s*[^=]+)?\s*=>/g;
+  while ((fm = arrowRe.exec(content))) {
+    const exportName = fm[1];
+    const after = content.slice(fm.index + fm[0].length);
+    const trimmed = after.replace(/^\s*/, '');
+    let bodyEnd = fm.index + fm[0].length;
+    if (trimmed.startsWith('{')) {
+      const abs = fm.index + fm[0].length + (after.length - trimmed.length);
+      const body = extractBalancedBlock(content, abs);
+      if (body) bodyEnd = abs + body.length + 2;
+    } else {
+      const m = trimmed.match(/^[^;\n]+/);
+      bodyEnd = fm.index + fm[0].length + (after.length - trimmed.length) + (m ? m[0].length : 0);
+    }
+    bindRange(exportName, fm.index, bodyEnd);
+  }
 }
 
 function dedupe(apis) {
@@ -930,6 +990,31 @@ function inferApiUsage(projectDir, opts = {}) {
   const inferCfg = loadInferConfig();
   const adapter = opts.adapter ? loadAdapter(opts.adapter) : null;
   const files = walk(projectDir);
+
+  // mtime cache (skip when forceRefresh)
+  if (!opts.forceRefresh) {
+    try {
+      const { getCached, setCached } = require('../lib/infer/cache');
+      const cached = getCached(projectDir, files, opts);
+      if (cached.hit && cached.value?.apis) {
+        const clone = cached.value.apis.map((a) => ({ ...a }));
+        Object.defineProperty(clone, 'meta', {
+          value: { ...(cached.value.meta || {}), cacheHit: true },
+          enumerable: false,
+          writable: true,
+        });
+        return clone;
+      }
+      opts.__cacheWrite = {
+        key: cached.key,
+        fingerprint: cached.fingerprint,
+        setCached,
+      };
+    } catch {
+      /* cache optional */
+    }
+  }
+
   const all = [];
   let gatewayFilteredCount = 0;
 
@@ -1011,10 +1096,22 @@ function inferApiUsage(projectDir, opts = {}) {
       serviceBases,
       gatewayFilteredCount,
       adapter: adapter ? adapter.name || opts.adapter : null,
+      cacheHit: false,
     },
     enumerable: false,
     writable: true,
   });
+
+  if (opts.__cacheWrite) {
+    try {
+      opts.__cacheWrite.setCached(opts.__cacheWrite.key, opts.__cacheWrite.fingerprint, {
+        apis: enriched.map((a) => ({ ...a })),
+        meta: enriched.meta,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
   return enriched;
 }
 

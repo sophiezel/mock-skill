@@ -26,7 +26,7 @@ function createMockApp(opts) {
   });
 
   app.use(express.json({ limit: '10mb' }));
-  app.use(express.urlencoded({ extended: false }));
+  app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
   app.use('/', createRouter({ mocksRoot, caseHeader }));
 

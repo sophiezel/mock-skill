@@ -16,11 +16,13 @@ function startMockServer({
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
+      const addr = server.address();
+      const boundPort = typeof addr === 'object' && addr ? addr.port : port;
       resolve({
         server,
         host,
-        port,
-        url: `http://${host}:${port}`,
+        port: boundPort,
+        url: `http://${host}:${boundPort}`,
         close: () =>
           new Promise((res, rej) => server.close((e) => (e ? rej(e) : res()))),
       });

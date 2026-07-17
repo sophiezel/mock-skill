@@ -80,7 +80,7 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 | mock 命中 | `mocks/<host>/<url-path>/index.js` |
 | miss | soft：透传 + capture，不因单接口拖垮 session |
 | CORS | 默认 localhost Origin；OPTIONS → 204；Hybrid WebView 非 localhost Origin 走 `cors.extraOrigins`（不实现「万能 Origin」） |
-| HTTPS | CONNECT 隧道透传；完整 MITM 改写为后续能力（P2），首期不假装已覆盖 |
+| HTTPS | 默认 CONNECT 隧道透传；可选 `--mitm=1` 对命中 rules 的 host 做本地 CA MITM（须信任 CA） |
 | E2E scenario 隔离 | 一 worker 一 session，或用例 `beforeEach`/`afterEach` `set-scenario` 复位；不建分布式锁 |
 
 ## LLM 介入边界
@@ -117,7 +117,7 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 - 不引入 WireMock/Java 作为运行时依赖
 - 不在本迭代做完整 MITM / OpenAPI import / 状态机平台 / Admin HTTP API / 证书自动安装 / Appium 插件
 
-## 后续（P1/P2，登记不阻塞 P0）
+## 后续（见 docs/BACKLOG.md）
 
-- P1：OpenAPI import；精细 query/header 匹配；轻量 stateful scenario；可选 export-msw
-- P2：HTTPS MITM（本地 CA、默认关、仅命中规则 host）
+- 1.1.0 已交付：OpenAPI import、when 匹配、stateful times、export-msw、最小 HTTPS MITM
+- 后续：证书一键信任、YAML OpenAPI、infer 进一步拆分

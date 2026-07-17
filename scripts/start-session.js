@@ -81,6 +81,25 @@ function applySessionOpts(base, opts = {}) {
   if (opts.autoLaunch === false) {
     patch.browser = { ...(patch.browser || {}), autoLaunch: false };
   }
+  if (opts.allowOpenProxy === true || opts['allow-open-proxy'] === true) {
+    patch.proxy = { ...(patch.proxy || {}), allowOpenProxy: true };
+  }
+  if (opts.mitm === true || opts.mitm === '1') {
+    patch.proxy = { ...(patch.proxy || {}), mitm: { enabled: true } };
+  }
+  if (opts.recordMockHits === true) {
+    patch.proxy = { ...(patch.proxy || {}), recordMockHits: true };
+  }
+  if (opts.mockPort != null || opts.proxyPort != null) {
+    // already handled above
+  }
+  // Validate numeric ports
+  if (patch.mock?.port != null && !Number.isFinite(patch.mock.port)) {
+    throw new Error(`invalid --mock-port: ${opts.mockPort}`);
+  }
+  if (patch.proxy?.port != null && !Number.isFinite(patch.proxy.port)) {
+    throw new Error(`invalid --proxy-port: ${opts.proxyPort}`);
+  }
   return Object.keys(patch).length ? deepMerge(base, patch) : base;
 }
 
@@ -131,6 +150,28 @@ async function startSession(opts = {}) {
       const live = loadSession(projectSlug);
       return live.cases || { default: 'success', active: {} };
     };
+    const allowOpenProxy = Boolean(
+      cfg.proxy.allowOpenProxy || opts.allowOpenProxy || opts['allow-open-proxy'],
+    );
+    let mitm = null;
+    if (cfg.proxy.mitm?.enabled || opts.mitm === true || opts.mitm === '1') {
+      try {
+        const { createMitmCa } = require('../lib/mitm-ca');
+        const ca = createMitmCa(projectSlug);
+        mitm = {
+          enabled: true,
+          getSecureContext: (hostname) => ca.getSecureContext(hostname),
+          caCertPath: ca.caCertPath,
+        };
+        console.log(`[mock-skill] HTTPS MITM enabled; trust CA: ${ca.caCertPath}`);
+      } catch (e) {
+        console.warn(`[mock-skill] MITM unavailable: ${e.message}`);
+      }
+    }
+    const statefulLoader = () => {
+      const live = loadSession(projectSlug);
+      return live.stateful || null;
+    };
     proxy = await startProxyServer({
       host: proxyHost,
       port: proxyPort,
@@ -139,11 +180,16 @@ async function startSession(opts = {}) {
       cors: cfg.cors,
       cases: cfg.cases,
       casesLoader,
+      statefulLoader,
       caseHeader: cfg.proxy.injectCaseHeader || 'x-mock-case',
       missPolicy: cfg.proxy.missPolicy || 'passthrough',
       blockWritePassthrough: cfg.proxy.blockWritePassthrough !== false,
       passthroughHosts: cfg.proxy.passthroughHosts || [],
       recordMisses: cfg.proxy.recordMisses !== false,
+      recordMockHits: Boolean(cfg.proxy.recordMockHits || opts.recordMockHits),
+      allowOpenProxy,
+      rejectUnauthorized: cfg.proxy.rejectUnauthorized !== false,
+      mitm,
       capturesDir: path.join(projectDataDir(projectSlug), 'captures'),
       taskId,
       accessLogPath: path.join(
@@ -152,7 +198,7 @@ async function startSession(opts = {}) {
         'proxy-access.jsonl',
       ),
     });
-    console.log(`[mock-skill] proxy ${proxy.url}`);
+    console.log(`[mock-skill] proxy ${proxy.url} missPolicy=${proxy.missPolicy}`);
     if (proxyHost === '0.0.0.0') {
       const ip = lanIp();
       const scenarioLabel = cfg.scenario || opts.scenario || '(unset)';
@@ -162,6 +208,16 @@ async function startSession(opts = {}) {
       console.log(`  port: ${proxyPort}`);
       console.log(`  scenario: ${scenarioLabel}`);
       console.log('  仅信任局域网，勿在公共 Wi‑Fi 开 0.0.0.0');
+      if (!allowOpenProxy) {
+        console.log('  missPolicy=reject（未传 --allow-open-proxy）；CONNECT 仅放行 passthroughHosts');
+      } else {
+        console.log('  WARNING: --allow-open-proxy 已开启，本机可被用作开放代理');
+      }
+      if (mitm?.caCertPath) {
+        console.log(`  HTTPS MITM CA（真机需安装信任）: ${mitm.caCertPath}`);
+      } else {
+        console.log('  HTTPS: 默认仅 CONNECT 隧道（无法改写）；启用 MITM: --mitm=1');
+      }
       console.log('');
     }
   } else {
@@ -225,6 +281,13 @@ async function startSession(opts = {}) {
   console.log('[mock-skill] session running — Ctrl+C to stop');
   const shutdown = async () => {
     console.log('\n[mock-skill] stopping...');
+    if (chromePid) {
+      try {
+        process.kill(chromePid, 'SIGTERM');
+      } catch (_) {
+        /* ignore */
+      }
+    }
     if (proxy) await proxy.close().catch(() => {});
     await mock.close().catch(() => {});
     saveRuntimeState(projectSlug, { ...state, stoppedAt: new Date().toISOString() });

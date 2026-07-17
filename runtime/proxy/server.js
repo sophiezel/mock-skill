@@ -4,24 +4,50 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const { URL } = require('url');
+const net = require('net');
+const tls = require('tls');
 const { applyCorsHeaders, handleOptions } = require('../../lib/cors');
 const { matchRule } = require('../../lib/match-rule');
+const { createStatefulEngine } = require('../../lib/stateful');
+
+const DEFAULT_BODY_LIMIT = 10 * 1024 * 1024; // 10mb
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000;
 
 function loadRules(rulesPath) {
   if (!rulesPath || !fs.existsSync(rulesPath)) return [];
   return JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
 }
 
-function readBody(req) {
+function readBody(req, { limit = DEFAULT_BODY_LIMIT } = {}) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        req.destroy();
+        reject(new Error(`request body exceeds limit (${limit} bytes)`));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
 
+function isLanBind(host) {
+  return host === '0.0.0.0' || host === '::' || host === '[::]';
+}
+
+/**
+ * Start forward proxy + optional HTTPS MITM for matched hosts.
+ *
+ * Security defaults:
+ * - CONNECT tunneling denied unless allowOpenProxy or host is in passthroughHosts
+ * - When bound to 0.0.0.0 without allowOpenProxy, missPolicy forced to reject
+ * - Body size limited; upstream timeout applied
+ */
 function startProxyServer(opts) {
   const {
     host = '127.0.0.1',
@@ -31,21 +57,74 @@ function startProxyServer(opts) {
     rulesPath,
     cors = {},
     cases = { default: 'success', active: {} },
-    casesLoader = null, // optional () => cases, for hot-reload (≤1s cache)
+    casesLoader = null,
+    /** optional () => stateful config from session */
+    statefulLoader = null,
     caseHeader = 'x-mock-case',
     missPolicy = 'passthrough',
     blockWritePassthrough = true,
     passthroughHosts = [],
     recordMisses = true,
+    recordMockHits = false,
     capturesDir,
     taskId = null,
     accessLogPath,
+    allowOpenProxy = false,
+    bodyLimit = DEFAULT_BODY_LIMIT,
+    upstreamTimeoutMs = DEFAULT_UPSTREAM_TIMEOUT_MS,
+    rejectUnauthorized = true,
+    /** Optional MITM: { enabled, getSecureContext(hostname) -> tls.SecureContext } */
+    mitm = null,
   } = opts;
 
   let activeRules = rules.length ? rules : loadRules(rulesPath);
   let activeCases = { ...cases };
   let casesCacheAt = 0;
   const CASES_TTL_MS = 1000;
+  let statefulEngine = null;
+  let statefulFingerprint = '';
+
+  function currentStateful() {
+    if (!statefulLoader) return null;
+    const cfg = statefulLoader() || null;
+    const fp = JSON.stringify(cfg || null);
+    if (fp !== statefulFingerprint) {
+      statefulFingerprint = fp;
+      statefulEngine = cfg ? createStatefulEngine(cfg) : null;
+    }
+    return statefulEngine;
+  }
+
+  function resolveCaseId(cs, rule, method, hostname, urlPath) {
+    const engine = currentStateful();
+    const keys = [
+      rule.id,
+      `${method} ${hostname}${urlPath}`,
+    ];
+    if (engine) {
+      for (const k of keys) {
+        const picked = engine.pick(k);
+        if (picked) return picked;
+      }
+    }
+    return (
+      cs.active?.[rule.id] ||
+      cs.active?.[`${method} ${hostname}${urlPath}`] ||
+      cs.default ||
+      'success'
+    );
+  }
+
+  const forcedMissPolicy =
+    isLanBind(host) && !allowOpenProxy && missPolicy === 'passthrough'
+      ? 'reject'
+      : missPolicy;
+
+  if (isLanBind(host) && !allowOpenProxy) {
+    console.warn(
+      '[proxy] WARNING: bound to all interfaces without --allow-open-proxy; missPolicy forced to reject; CONNECT denied except passthroughHosts',
+    );
+  }
 
   function currentCases() {
     if (!casesLoader) return activeCases;
@@ -67,18 +146,24 @@ function startProxyServer(opts) {
     });
     if (accessLogPath) {
       fs.mkdirSync(path.dirname(accessLogPath), { recursive: true });
-      fs.appendFileSync(accessLogPath, `${line}\n`);
+      fs.appendFile(accessLogPath, `${line}\n`, () => {});
     }
     console.log(`[proxy] ${entry.action} ${entry.method} ${entry.url}`);
   }
 
   function recordCapture(rec) {
-    if (!recordMisses || !capturesDir) return;
+    if (!capturesDir) return;
+    if (!recordMisses && rec.reason !== 'mock-hit') return;
+    if (rec.reason === 'mock-hit' && !recordMockHits) return;
     fs.mkdirSync(capturesDir, { recursive: true });
     const name = `${Date.now()}-${(rec.host || 'h').replace(/\W/g, '_')}-${rec.path
       .replace(/\W/g, '_')
       .slice(0, 80)}.json`;
-    fs.writeFileSync(path.join(capturesDir, name), `${JSON.stringify(rec, null, 2)}\n`);
+    fs.writeFile(
+      path.join(capturesDir, name),
+      `${JSON.stringify(rec, null, 2)}\n`,
+      () => {},
+    );
   }
 
   function isPassthroughHost(hostname) {
@@ -89,6 +174,12 @@ function startProxyServer(opts) {
     );
   }
 
+  function allowConnectTunnel(hostname) {
+    if (isPassthroughHost(hostname)) return true;
+    if (allowOpenProxy && forcedMissPolicy === 'passthrough') return true;
+    return false;
+  }
+
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === 'OPTIONS') {
@@ -97,7 +188,6 @@ function startProxyServer(opts) {
         return;
       }
 
-      // Absolute-form proxy request: GET http://host/path
       let target;
       if (req.url.startsWith('http://') || req.url.startsWith('https://')) {
         target = new URL(req.url);
@@ -109,9 +199,17 @@ function startProxyServer(opts) {
       const hostname = target.hostname;
       const urlPath = target.pathname;
       const method = req.method || 'GET';
-      const body = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
-        ? await readBody(req)
-        : Buffer.alloc(0);
+      let body = Buffer.alloc(0);
+      try {
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+          body = await readBody(req, { limit: bodyLimit });
+        }
+      } catch (e) {
+        applyCorsHeaders(req, res, cors);
+        res.statusCode = 413;
+        res.end(JSON.stringify({ code: 413, message: e.message, data: null }));
+        return;
+      }
 
       if (isPassthroughHost(hostname)) {
         const up = await forwardUpstream(req, res, target, body, cors, true);
@@ -126,14 +224,13 @@ function startProxyServer(opts) {
         return;
       }
 
-      const rule = matchRule(activeRules, hostname, urlPath, method);
+      const cs = currentCases();
+      const rule = matchRule(activeRules, hostname, urlPath, method, {
+        query: Object.fromEntries(target.searchParams),
+        headers: req.headers,
+      });
       if (rule) {
-        const cs = currentCases();
-        const caseId =
-          cs.active?.[rule.id] ||
-          cs.active?.[`${method} ${hostname}${urlPath}`] ||
-          cs.default ||
-          'success';
+        const caseId = resolveCaseId(cs, rule, method, hostname, urlPath);
 
         const headers = { ...req.headers };
         headers.host = mockUrl.host;
@@ -150,19 +247,47 @@ function startProxyServer(opts) {
             path: mockPath,
             method,
             headers,
+            timeout: upstreamTimeoutMs,
           },
           (mockRes) => {
             applyCorsHeaders(req, res, cors);
             const outHeaders = { ...mockRes.headers };
             delete outHeaders['access-control-allow-origin'];
-            res.writeHead(mockRes.statusCode || 200, outHeaders);
-            mockRes.pipe(res);
+            const chunks = [];
+            mockRes.on('data', (c) => chunks.push(c));
+            mockRes.on('end', () => {
+              const buf = Buffer.concat(chunks);
+              res.writeHead(mockRes.statusCode || 200, outHeaders);
+              res.end(buf);
+              if (recordMockHits) {
+                let bodyJson;
+                const bodyText = buf.toString('utf8');
+                try {
+                  bodyJson = JSON.parse(bodyText);
+                } catch {
+                  bodyJson = undefined;
+                }
+                recordCapture({
+                  host: hostname,
+                  path: urlPath,
+                  method,
+                  reason: 'mock-hit',
+                  caseId,
+                  responseBody: bodyJson ?? bodyText,
+                });
+              }
+            });
           },
         );
+        mockReq.on('timeout', () => {
+          mockReq.destroy(new Error('mock upstream timeout'));
+        });
         mockReq.on('error', (e) => {
           applyCorsHeaders(req, res, cors);
-          res.statusCode = 502;
-          res.end(JSON.stringify({ code: 502, message: e.message }));
+          if (!res.headersSent) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ code: 502, message: e.message }));
+          }
         });
         if (body.length) mockReq.write(body);
         mockReq.end();
@@ -177,7 +302,7 @@ function startProxyServer(opts) {
       }
 
       const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
-      if (isWrite && blockWritePassthrough && missPolicy !== 'reject') {
+      if (isWrite && blockWritePassthrough && forcedMissPolicy !== 'reject') {
         applyCorsHeaders(req, res, cors);
         res.statusCode = 403;
         res.end(
@@ -197,7 +322,7 @@ function startProxyServer(opts) {
         return;
       }
 
-      if (missPolicy === 'reject') {
+      if (forcedMissPolicy === 'reject') {
         applyCorsHeaders(req, res, cors);
         res.statusCode = 404;
         res.end(JSON.stringify({ code: 404, message: 'no mock rule', data: null }));
@@ -222,12 +347,56 @@ function startProxyServer(opts) {
     }
   });
 
-  // CONNECT for HTTPS tunnel (no MITM in v1)
+  // CONNECT: tunnel only when allowed; optional MITM for matched HTTPS hosts
   server.on('connect', (req, clientSocket, head) => {
     const [hostname, portStr] = (req.url || '').split(':');
     const portNum = Number(portStr || 443);
-    if (isPassthroughHost(hostname) || missPolicy === 'passthrough') {
-      const upstream = netConnect(hostname, portNum, () => {
+
+    const mitmEnabled = Boolean(mitm?.enabled && typeof mitm.getSecureContext === 'function');
+    const ruleHit =
+      mitmEnabled &&
+      matchRule(activeRules, hostname, '/', 'GET', { query: {}, headers: {} });
+
+    if (mitmEnabled && ruleHit) {
+      try {
+        const ctx = mitm.getSecureContext(hostname);
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        const tlsSock = new tls.TLSSocket(clientSocket, {
+          isServer: true,
+          secureContext: ctx,
+        });
+        tlsSock.on('error', () => {
+          try {
+            clientSocket.end();
+          } catch (_) {
+            /* ignore */
+          }
+        });
+        // Minimal MITM: after handshake, parse as HTTP and reuse createServer logic via mock hop
+        tlsSock.once('secure', () => {
+          const fakeReq = new http.IncomingMessage(tlsSock);
+          // Fall back to tunnel-style: pipe decrypted stream through a one-shot HTTP parser is complex;
+          // for v1 MITM we forward decrypted bytes to a local HTTPS→mock bridge via absolute URL rewrite helper.
+          handleMitmTlsSocket(tlsSock, hostname, portNum, head);
+        });
+        if (head && head.length) tlsSock.write(head);
+        logAccess({ action: 'connect-mitm', method: 'CONNECT', url: req.url });
+        return;
+      } catch (e) {
+        logAccess({
+          action: 'connect-mitm-fail',
+          method: 'CONNECT',
+          url: req.url,
+          error: e.message,
+        });
+        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+        clientSocket.end();
+        return;
+      }
+    }
+
+    if (allowConnectTunnel(hostname)) {
+      const upstream = net.connect(portNum, hostname, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head && head.length) upstream.write(head);
         upstream.pipe(clientSocket);
@@ -238,12 +407,108 @@ function startProxyServer(opts) {
       logAccess({ action: 'connect-tunnel', method: 'CONNECT', url: req.url });
       return;
     }
+
     clientSocket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     clientSocket.end();
+    logAccess({ action: 'connect-deny', method: 'CONNECT', url: req.url });
   });
 
-  function netConnect(hostname, portNum, cb) {
-    return require('net').connect(portNum, hostname, cb);
+  /**
+   * After TLS handshake with client, parse HTTP requests and route to mock/upstream.
+   * Simplified: use HTTP parser on the decrypted socket.
+   */
+  function handleMitmTlsSocket(tlsSock, hostname, _portNum, _head) {
+    const bridge = http.createServer(async (req, res) => {
+      const urlPath = req.url || '/';
+      const method = req.method || 'GET';
+      let body = Buffer.alloc(0);
+      try {
+        if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+          body = await readBody(req, { limit: bodyLimit });
+        }
+      } catch (e) {
+        res.statusCode = 413;
+        res.end(JSON.stringify({ code: 413, message: e.message }));
+        return;
+      }
+
+      const cs = currentCases();
+      const pathname = urlPath.split('?')[0];
+      const search = urlPath.includes('?') ? urlPath.slice(urlPath.indexOf('?')) : '';
+      const query = Object.fromEntries(new URL(`http://${hostname}${urlPath}`).searchParams);
+      const rule = matchRule(activeRules, hostname, pathname, method, {
+        query,
+        headers: req.headers,
+      });
+
+      if (!rule) {
+        if (forcedMissPolicy === 'reject' && !allowOpenProxy) {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ code: 404, message: 'no mock rule (mitm)' }));
+          return;
+        }
+        // passthrough over real HTTPS
+        const upReq = https.request(
+          {
+            hostname,
+            port: 443,
+            path: urlPath,
+            method,
+            headers: { ...req.headers, host: hostname },
+            rejectUnauthorized,
+            timeout: upstreamTimeoutMs,
+          },
+          (upRes) => {
+            res.writeHead(upRes.statusCode || 200, upRes.headers);
+            upRes.pipe(res);
+          },
+        );
+        upReq.on('error', (e) => {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ code: 502, message: e.message }));
+        });
+        if (body.length) upReq.write(body);
+        upReq.end();
+        return;
+      }
+
+      const caseId = resolveCaseId(cs, rule, method, hostname, pathname);
+      const headers = { ...req.headers };
+      headers.host = mockUrl.host;
+      headers['x-forwarded-host'] = hostname;
+      headers[caseHeader] = caseId;
+      delete headers['content-length'];
+
+      const mockReq = http.request(
+        {
+          protocol: mockUrl.protocol,
+          hostname: mockUrl.hostname,
+          port: mockUrl.port,
+          path: pathname + search,
+          method,
+          headers,
+          timeout: upstreamTimeoutMs,
+        },
+        (mockRes) => {
+          res.writeHead(mockRes.statusCode || 200, mockRes.headers);
+          mockRes.pipe(res);
+        },
+      );
+      mockReq.on('error', (e) => {
+        res.statusCode = 502;
+        res.end(JSON.stringify({ code: 502, message: e.message }));
+      });
+      if (body.length) mockReq.write(body);
+      mockReq.end();
+      logAccess({
+        action: 'mitm-mock',
+        method,
+        url: `https://${hostname}${urlPath}`,
+        caseId,
+        ruleId: rule.id,
+      });
+    });
+    bridge.emit('connection', tlsSock);
   }
 
   function forwardUpstream(clientReq, clientRes, target, body, corsCfg, injectCors) {
@@ -259,7 +524,8 @@ function startProxyServer(opts) {
           path: target.pathname + target.search,
           method: clientReq.method,
           headers,
-          rejectUnauthorized: false,
+          rejectUnauthorized,
+          timeout: upstreamTimeoutMs,
         },
         (upRes) => {
           if (injectCors) applyCorsHeaders(clientReq, clientRes, corsCfg);
@@ -275,16 +541,23 @@ function startProxyServer(opts) {
             } catch {
               bodyJson = undefined;
             }
-            clientRes.writeHead(upRes.statusCode || 200, outHeaders);
-            clientRes.end(buf);
+            if (!clientRes.headersSent) {
+              clientRes.writeHead(upRes.statusCode || 200, outHeaders);
+              clientRes.end(buf);
+            }
             resolve({ status: upRes.statusCode, bodyText, bodyJson });
           });
         },
       );
+      upstream.on('timeout', () => {
+        upstream.destroy(new Error('upstream timeout'));
+      });
       upstream.on('error', (e) => {
         if (injectCors) applyCorsHeaders(clientReq, clientRes, corsCfg);
-        clientRes.statusCode = 502;
-        clientRes.end(JSON.stringify({ code: 502, message: e.message }));
+        if (!clientRes.headersSent) {
+          clientRes.statusCode = 502;
+          clientRes.end(JSON.stringify({ code: 502, message: e.message }));
+        }
         resolve({ error: e.message });
       });
       if (body.length) upstream.write(body);
@@ -295,13 +568,20 @@ function startProxyServer(opts) {
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
+      const addr = server.address();
+      const boundPort = typeof addr === 'object' && addr ? addr.port : port;
       resolve({
         server,
         host,
-        port,
-        url: `http://${host}:${port}`,
+        port: boundPort,
+        url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${boundPort}`,
+        missPolicy: forcedMissPolicy,
+        allowOpenProxy,
         setCases(next) {
           activeCases = { ...activeCases, ...next };
+          casesCacheAt = 0;
+        },
+        invalidateCasesCache() {
           casesCacheAt = 0;
         },
         reloadRules(nextRules) {
@@ -314,4 +594,4 @@ function startProxyServer(opts) {
   });
 }
 
-module.exports = { startProxyServer, matchRule, loadRules };
+module.exports = { startProxyServer, matchRule, loadRules, readBody, isLanBind };

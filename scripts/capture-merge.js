@@ -95,6 +95,7 @@ function captureMerge(projectSlug, opts = {}) {
 
   const contracts = loadExistingContracts(projectSlug);
   let merged = 0;
+  const skipped = [];
 
   for (const f of fs.readdirSync(capturesDir)) {
     if (!f.endsWith('.json')) continue;
@@ -102,9 +103,24 @@ function captureMerge(projectSlug, opts = {}) {
     try {
       cap = JSON.parse(fs.readFileSync(path.join(capturesDir, f), 'utf8'));
     } catch {
+      skipped.push({ file: f, reason: 'invalid_json' });
       continue;
     }
-    if (!cap.path || !cap.responseBody) continue;
+    if (!cap.path) {
+      skipped.push({ file: f, reason: 'missing_path' });
+      continue;
+    }
+    if (!cap.responseBody) {
+      skipped.push({
+        file: f,
+        reason: 'empty_responseBody',
+        hint: 'capture had no body — backend may be down, or write miss was blocked (blockWritePassthrough). Try soft passthrough with a live upstream, or --record-mock-hits after mock is seeded.',
+        host: cap.host,
+        path: cap.path,
+        method: cap.method,
+      });
+      continue;
+    }
     const host = cap.host || '_default';
     const method = (cap.method || 'GET').toUpperCase();
     const id = apiKey({ host, method, path: cap.path });
@@ -177,8 +193,19 @@ function captureMerge(projectSlug, opts = {}) {
     merged++;
   }
 
+  if (skipped.length) {
+    const report = path.join(
+      projectDataDir(projectSlug),
+      'reports',
+      `capture-merge-skipped-${Date.now()}.json`,
+    );
+    fs.writeFileSync(report, `${JSON.stringify({ skipped }, null, 2)}\n`);
+    console.log(
+      `[mock-skill] capture-merge skipped=${skipped.length} (see ${report})`,
+    );
+  }
   console.log(`[mock-skill] capture-merge merged=${merged}`);
-  return { merged };
+  return { merged, skipped };
 }
 
 module.exports = { captureMerge, mergeDataAdditive, deepMergeShape };

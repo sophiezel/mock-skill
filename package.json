@@ -1,6 +1,6 @@
 {
   "name": "mock-skill",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Generic zero-coupling frontend API mock (self-test + E2E, desktop + on-device WebView)",
   "bin": {
     "mock-skill": "./bin/mock-skill.js"
@@ -8,8 +8,11 @@
   "scripts": {
     "mock-skill": "node ./bin/mock-skill.js",
     "install:local": "bash ./scripts/install.sh",
-    "test": "node --test test/cors.test.js test/match-rule.test.js test/case-resolve.test.js test/scenario.test.js test/materialize.test.js test/mock-router-cases.test.js test/proxy-inject-case.test.js test/start-session-proxy.test.js test/infer-adapter.test.js test/usage-io-destructure.test.js test/capture-merge.test.js test/usage-export-patterns.test.js test/generate-prune.test.js",
-    "test:smoke": "node scripts/run-fixture-smoke.js"
+    "test": "node --test test/*.test.js",
+    "test:smoke": "node scripts/run-fixture-smoke.js",
+    "test:all": "npm test && npm run test:smoke",
+    "test:coverage": "c8 --reporter=text --reporter=lcov --check-coverage --lines 60 node --test test/*.test.js",
+    "lint": "eslint bin lib runtime scripts test adapters --max-warnings 50"
   },
   "engines": {
     "node": ">=18"
@@ -17,8 +20,24 @@
   "dependencies": {
     "@faker-js/faker": "^9.9.0",
     "express": "^4.21.2",
-    "http-proxy": "^1.18.1",
     "ts-morph": "^24.0.0"
   },
-  "license": "MIT"
+  "devDependencies": {
+    "c8": "^10.1.3",
+    "eslint": "^9.39.5"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "lib",
+    "runtime",
+    "scripts",
+    "adapters",
+    "assets",
+    "config",
+    "references",
+    "SKILL.md",
+    "README.md",
+    "LICENSE"
+  ]
 }

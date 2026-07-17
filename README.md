@@ -88,9 +88,19 @@ mock-skill session start --proxy-port=19000
 mock-skill session start --proxy-host=0.0.0.0 --scenario=e2e-fault --start-url=http://localhost:8080
 # 按启动日志【真机 Wi‑Fi 代理】块填写：LAN IP / port / 当前 scenario
 # listen=0.0.0.0；桌面 Chrome 仍走 127.0.0.1
+# 默认 missPolicy=reject（防开放代理）；需要透传时显式 --allow-open-proxy
 # 仅信任局域网，勿在公共 Wi‑Fi 开 0.0.0.0
-# 并行 E2E：一 worker 一 session，或用例前后 set-scenario 复位
 ```
+
+**HTTPS 说明（诚实边界）**：
+
+| 模式 | 行为 |
+|------|------|
+| 默认 | CONNECT **仅隧道透传**，**不改写** HTTPS 响应 |
+| `--mitm=1` | 对 `proxy-rules` 命中 host 做本地 CA MITM（需 openssl；真机/桌面须信任打印的 CA） |
+| 外挂 | 仍可用 Whistle 等做 MITM，再链到本 CLI |
+
+生产 H5 几乎全是 HTTPS —— 真机要改写响应请加 `--mitm=1` 并安装 CA，或走 HTTP 调试域。
 
 详见 [`references/e2e-and-device-proxy.md`](./references/e2e-and-device-proxy.md)。
 
@@ -117,6 +127,8 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 | 命令 | 作用 |
 |------|------|
 | `mock-skill init [--adapter=]` | 全量扫描并预生成 mock |
+| `mock-skill import-openapi --from=` | 从 OpenAPI JSON 生成 contracts/handlers |
+| `mock-skill export-msw` | 导出 MSW handlers 供单测 |
 | `mock-skill classify` | 分类 |
 | `mock-skill generate` | 按分类结果生成 |
 | `mock-skill session start\|stop` | 起停 mock±proxy（`--proxy-host` / `--scenario`） |

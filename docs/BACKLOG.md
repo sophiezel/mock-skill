@@ -1,16 +1,27 @@
-# Backlog（登记，不阻塞 P0）
+# Backlog（登记，不阻塞已交付项）
 
-## P1
+## Done in 1.1.0
+
+| 项 | 说明 |
+|----|------|
+| HTTPS MITM（最小） | `--mitm=1` + 本地 CA；仅命中 rules 的 host |
+| 精细匹配（when） | proxy rules 支持 `when.query` / `when.header` |
+| 轻量 stateful | scenario `times` / `transitions` |
+| OpenAPI import | `mock-skill import-openapi --from=` |
+| export-msw | `mock-skill export-msw` |
+
+## P1（后续）
 
 | 项 | 说明 | 触发条件 |
 |----|------|----------|
-| OpenAPI import | 从 OpenAPI/Swagger spec 直接生成 contracts（替代/补充静态 infer） | 团队有 spec 维护 |
-| 精细匹配 | query/header 维度的 rule 匹配（当前仅 host+pathPrefix+method） | 同 path 不同 query 需不同 case |
-| 轻量 stateful scenario | scenario 支持状态机（如“第 N 次请求返回 500，之后 200”） | 分页/重试/竞态 E2E |
-| export-msw | 把 contract cases 导出为 MSW handlers，供进程内单测复用 | 单测也要用同套 case |
+| MITM 证书一键信任 | 桌面 keychain / 真机引导脚本 | 团队真机 HTTPS 日用 |
+| OpenAPI YAML | 当前仅 JSON | 团队只有 yaml |
+| infer 进一步拆分 | `lib/infer/{discover,usage-io}` 彻底下沉 | 维护成本上升 |
+| capture 命中采样默认开 | 现需 `--record-mock-hits` | 补洞流程成为主路径 |
 
 ## P2
 
 | 项 | 说明 | 触发条件 |
 |----|------|----------|
-| HTTPS MITM | 本地 CA + 信任 + 仅对命中规则 host 做 MITM，改写 HTTPS 响应 | 真机 HTTPS mock 必需 |
+| GraphQL / WebSocket | 非目标直至明确需求 | 客户点名 |
+| Admin HTTP API / UI | 保持 CLI-first | — |

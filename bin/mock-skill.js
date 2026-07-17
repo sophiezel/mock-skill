@@ -45,7 +45,13 @@ Usage:
   mock-skill smoke [--name=slug] [--ci] [--cases=...] [--scenario=NAME]
   mock-skill audit [--task=ID] [--api=host/path]
   mock-skill capture-merge [--name=slug] [--task=ID]
+  mock-skill import-openapi --from=<spec.json> [--task=ID] [--force]
+  mock-skill export-msw [--out=path] [--name=slug]
   mock-skill install | uninstall
+
+Session security:
+  --allow-open-proxy   permit passthrough/CONNECT when binding 0.0.0.0 (default: reject)
+  --mitm=1             enable HTTPS MITM for matched hosts (requires openssl; trust printed CA)
 
 Install:
   bash scripts/install.sh
@@ -130,7 +136,7 @@ async function main() {
     const { generateMocks } = require('../scripts/generate-mock');
     const fs = require('fs');
     const path = require('path');
-    const projectDir = process.cwd();
+    const projectDir = rest[0] || process.cwd();
     const projectSlug = resolveProjectSlug(projectDir, f.name);
     const rolesFile = path.join(
       projectDataDir(projectSlug),
@@ -168,6 +174,9 @@ async function main() {
         startUrl: f['start-url'],
         autoLaunch: f['no-auto-launch'] ? false : undefined,
         scenario: f.scenario,
+        allowOpenProxy: Boolean(f['allow-open-proxy']),
+        mitm: f.mitm === true || f.mitm === '1' || f.mitm === 1,
+        recordMockHits: Boolean(f['record-mock-hits']),
       });
       return;
     }
@@ -241,6 +250,30 @@ async function main() {
     return;
   }
 
+  if (cmd === 'import-openapi') {
+    const { importOpenApi } = require('../scripts/import-openapi');
+    importOpenApi({
+      projectDir: process.cwd(),
+      name: f.name,
+      from: f.from,
+      taskId: f.task || null,
+      force: Boolean(f.force),
+    });
+    return;
+  }
+
+  if (cmd === 'export-msw') {
+    const { exportMsw } = require('../scripts/export-msw');
+    exportMsw({
+      projectDir: process.cwd(),
+      name: f.name,
+      out: f.out,
+      taskId: f.task || null,
+    });
+    return;
+  }
+
+  console.error(`[mock-skill] unknown command: ${cmd}`);
   help();
   process.exit(1);
 }

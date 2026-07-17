@@ -53,12 +53,10 @@ async function withProxyEnv(fn) {
     return cases[caseId] || cases.success;
   };`);
 
-  const mockPort = 4900 + Math.floor(Math.random() * 1000);
-  const proxyPort = mockPort + 1;
-  const mock = await startMockServer({ mocksRoot: tmpMock, host: '127.0.0.1', port: mockPort });
+  const mock = await startMockServer({ mocksRoot: tmpMock, host: '127.0.0.1', port: 0 });
   const proxy = await startProxyServer({
     host: '127.0.0.1',
-    port: proxyPort,
+    port: 0,
     mockTarget: mock.url,
     rules: [{ id: RULE_ID, host: 'api.example.com', pathPrefix: '/v1/users', methods: ['GET'] }],
     cases: { default: 'success', active: {} },

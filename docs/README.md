@@ -19,6 +19,8 @@
 | [infer-from-usage.md](../references/infer-from-usage.md) | 用法反推 |
 | [generate-mock.md](../references/generate-mock.md) | mock 生成 |
 | [session-and-proxy.md](../references/session-and-proxy.md) | session / 代理 |
+| [scenarios.md](../references/scenarios.md) | scenario / case 切换 |
+| [e2e-and-device-proxy.md](../references/e2e-and-device-proxy.md) | 桌面 E2E + 真机 Wi‑Fi 代理 / HTTPS |
 | [pitfalls.md](../references/pitfalls.md) | 已知坑 |
 
 ## 历史计划存档（archive）

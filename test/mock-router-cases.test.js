@@ -51,8 +51,7 @@ async function withServer(fn) {
     };
     return cases[caseId] || cases.success;
   };`);
-  const port = 3901 + Math.floor(Math.random() * 1000);
-  const srv = await startMockServer({ mocksRoot: tmp, host: '127.0.0.1', port });
+  const srv = await startMockServer({ mocksRoot: tmp, host: '127.0.0.1', port: 0 });
   try {
     await fn(`${srv.url}/v1/users`, 'api.example.com');
   } finally {

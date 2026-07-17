@@ -56,3 +56,51 @@ test('prefix is a string prefix (documented behavior): /v1 also matches /v1users
 test('empty rules returns null', () => {
   assert.equal(matchRule([], 'api.example.com', '/x', 'GET'), null);
 });
+
+test('when.query must match', () => {
+  const withWhen = [
+    {
+      id: 'q',
+      host: 'api.example.com',
+      pathPrefix: '/v1/search',
+      methods: ['GET'],
+      when: { query: { q: 'foo' } },
+    },
+  ];
+  assert.equal(
+    matchRule(withWhen, 'api.example.com', '/v1/search', 'GET', {
+      query: { q: 'bar' },
+    }),
+    null,
+  );
+  assert.equal(
+    matchRule(withWhen, 'api.example.com', '/v1/search', 'GET', {
+      query: { q: 'foo' },
+    }).id,
+    'q',
+  );
+});
+
+test('when.header must match (case-insensitive header lookup)', () => {
+  const withWhen = [
+    {
+      id: 'h',
+      host: 'api.example.com',
+      pathPrefix: '/v1/x',
+      methods: ['GET'],
+      when: { header: { 'x-tenant': 'a' } },
+    },
+  ];
+  assert.equal(
+    matchRule(withWhen, 'api.example.com', '/v1/x', 'GET', {
+      headers: { 'x-tenant': 'b' },
+    }),
+    null,
+  );
+  assert.equal(
+    matchRule(withWhen, 'api.example.com', '/v1/x', 'GET', {
+      headers: { 'x-tenant': 'a' },
+    }).id,
+    'h',
+  );
+});

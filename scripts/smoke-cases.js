@@ -70,13 +70,32 @@ async function smokeCases(opts = {}) {
 
   const mockBase = `http://${cfg.mock.host}:${cfg.mock.port}`;
   const caseHeader = cfg.proxy?.injectCaseHeader || 'x-mock-case';
+  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
   const results = [];
   let failed = 0;
+  let skippedNoHandler = 0;
+
+  function handlerExists(contract) {
+    const host = (contract.host || '_default').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    const rel = String(contract.path || '/').replace(/^\//, '');
+    const candidates = [
+      path.join(mocksRoot, host, rel, 'index.js'),
+      path.join(mocksRoot, host.replace(/\./g, '_'), rel, 'index.js'),
+      path.join(mocksRoot, '_default', rel, 'index.js'),
+      path.join(mocksRoot, rel, 'index.js'),
+    ];
+    return candidates.some((p) => fs.existsSync(p));
+  }
 
   for (const f of fs.readdirSync(contractsDir).filter((x) => x.endsWith('.json'))) {
     const contract = JSON.parse(
       fs.readFileSync(path.join(contractsDir, f), 'utf8'),
     );
+    // Only smoke APIs that have materialized handlers (contracts-only / skippedEmpty excluded)
+    if (!handlerExists(contract)) {
+      skippedNoHandler++;
+      continue;
+    }
     const cases = contract.cases || [{ id: 'success', httpStatus: 200 }];
     for (const c of cases) {
       if (includeCases && !includeCases.has(c.id)) continue;
@@ -128,6 +147,7 @@ async function smokeCases(opts = {}) {
     `- ci: ${ci}`,
     `- total: ${results.length}`,
     `- failed: ${failed}`,
+    `- skippedNoHandler: ${skippedNoHandler}`,
     '',
     ...results.map(
       (r) =>
@@ -143,8 +163,12 @@ async function smokeCases(opts = {}) {
   });
   console.log(md);
   console.log(`[mock-skill] smoke report: ${report}`);
+  if (ci && results.length === 0) {
+    console.error('[mock-skill] smoke --ci: no handlers to smoke (all contracts skipped)');
+    failed = failed || 1;
+  }
   if (failed) process.exitCode = 1;
-  return { results, failed, report };
+  return { results, failed, report, skippedNoHandler };
 }
 
 module.exports = { smokeCases };

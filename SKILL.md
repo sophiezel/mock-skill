@@ -73,6 +73,9 @@ bash scripts/install.sh
 cd <frontend> && mock-skill init [--task=ID] [--related-from=doc]
 mock-skill session start --task=ID --start-url=http://localhost:8080
 mock-skill set-scenario e2e-fault && mock-skill capture-merge
+# HTTPS 改写（可选）: session start --mitm=1 （须信任打印的 CA）
+# LAN 开放代理须显式: --allow-open-proxy
+# OpenAPI: mock-skill import-openapi --from=./openapi.json
 ```
 
-详情与真机/`--proxy-host` → [`README.md`](./README.md)。
+详情与真机/`--proxy-host` → [`README.md`](./README.md)。**HTTPS 默认不改写**（CONNECT 隧道）；真机 HTTPS mock 用 `--mitm=1`。

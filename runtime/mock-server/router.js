@@ -5,31 +5,87 @@ const fs = require('fs');
 const path = require('path');
 const { resolveCase, pickCase, isDescriptor } = require('../../lib/case-resolve');
 
+/**
+ * Ensure candidate path stays inside mocksRoot (no path traversal).
+ * @param {string} mocksRoot
+ * @param {string} candidate
+ * @returns {string|null} resolved absolute path or null if outside jail
+ */
+function jailPath(mocksRoot, candidate) {
+  const root = path.resolve(mocksRoot);
+  const resolved = path.resolve(candidate);
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  if (resolved === root || resolved.startsWith(prefix)) return resolved;
+  return null;
+}
+
+/**
+ * Reject path segments that enable traversal or absolute escapes.
+ * @param {string} relative
+ */
+function isUnsafeRelative(relative) {
+  if (!relative) return false;
+  if (path.isAbsolute(relative)) return true;
+  const parts = relative.split(/[/\\]/);
+  return parts.some((p) => p === '..' || p === '');
+}
+
+/**
+ * Resolve handler file under mocksRoot with path jail.
+ * Exported for unit tests.
+ */
 function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
   const clean = urlPath.replace(/\/+$/, '') || '/';
   const relative = clean.replace(/^\//, '');
+  if (isUnsafeRelative(relative)) return null;
+
+  const root = path.resolve(mocksRoot);
   const candidates = [];
 
   if (hostHeader) {
-    const host = hostHeader.split(':')[0];
-    candidates.push(path.join(mocksRoot, host, relative, 'index.js'));
-    candidates.push(path.join(mocksRoot, host.replace(/\./g, '_'), relative, 'index.js'));
+    const host = String(hostHeader).split(':')[0].replace(/[^a-zA-Z0-9._-]+/g, '_');
+    if (host && !host.includes('..')) {
+      candidates.push(path.join(root, host, relative, 'index.js'));
+      candidates.push(path.join(root, host.replace(/\./g, '_'), relative, 'index.js'));
+    }
   }
-  candidates.push(path.join(mocksRoot, '_default', relative, 'index.js'));
-  candidates.push(path.join(mocksRoot, relative, 'index.js'));
+  candidates.push(path.join(root, '_default', relative, 'index.js'));
+  candidates.push(path.join(root, relative, 'index.js'));
 
   for (const file of candidates) {
-    if (fs.existsSync(file)) return file;
+    const jailed = jailPath(root, file);
+    if (!jailed) continue;
+    if (fs.existsSync(jailed)) return jailed;
   }
   return null;
 }
 
-function clearRequireCache(filePath) {
+/** mtime-based require cache: only reload when file changes */
+const handlerCache = new Map(); // filePath -> { mtimeMs, mod }
+
+function loadHandler(filePath) {
+  let mtimeMs = 0;
+  try {
+    mtimeMs = fs.statSync(filePath).mtimeMs;
+  } catch {
+    return null;
+  }
+  const cached = handlerCache.get(filePath);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.mod;
+
   try {
     delete require.cache[require.resolve(filePath)];
   } catch (_) {
     /* ignore */
   }
+  const mod = require(filePath);
+  handlerCache.set(filePath, { mtimeMs, mod });
+  return mod;
+}
+
+/** @internal test helper */
+function clearHandlerCache() {
+  handlerCache.clear();
 }
 
 function sendPlan(res, plan) {
@@ -65,6 +121,15 @@ function createRouter({ mocksRoot, caseHeader }) {
       return;
     }
 
+    let delayTimer = null;
+    const clearDelay = () => {
+      if (delayTimer) {
+        clearTimeout(delayTimer);
+        delayTimer = null;
+      }
+    };
+    req.on('close', clearDelay);
+
     try {
       const raw = fs.readFileSync(filePath, 'utf8');
       if (/^\s*{[\s\S]*}\s*$/.test(raw)) {
@@ -72,8 +137,15 @@ function createRouter({ mocksRoot, caseHeader }) {
         res.json(JSON.parse(raw));
         return;
       }
-      clearRequireCache(filePath);
-      const fn = require(filePath);
+      const fn = loadHandler(filePath);
+      if (typeof fn !== 'function') {
+        res.status(500).json({
+          code: 500,
+          message: 'mock handler is not a function',
+          data: null,
+        });
+        return;
+      }
       const mockCase =
         req.headers[caseHeader] ||
         req.query.__mockCase ||
@@ -108,16 +180,22 @@ function createRouter({ mocksRoot, caseHeader }) {
       }
 
       if (plan.delayMs && plan.delayMs > 0) {
-        setTimeout(() => sendPlan(res, plan), plan.delayMs);
+        delayTimer = setTimeout(() => {
+          delayTimer = null;
+          if (!res.headersSent && !res.writableEnded) sendPlan(res, plan);
+        }, plan.delayMs);
       } else {
         sendPlan(res, plan);
       }
     } catch (err) {
-      res.status(500).json({
-        code: 500,
-        message: err.message,
-        data: null,
-      });
+      clearDelay();
+      if (!res.headersSent) {
+        res.status(500).json({
+          code: 500,
+          message: err.message,
+          data: null,
+        });
+      }
     }
   };
 
@@ -126,3 +204,7 @@ function createRouter({ mocksRoot, caseHeader }) {
 }
 
 module.exports = createRouter;
+module.exports.resolveHandlerFile = resolveHandlerFile;
+module.exports.jailPath = jailPath;
+module.exports.clearHandlerCache = clearHandlerCache;
+module.exports.loadHandler = loadHandler;
