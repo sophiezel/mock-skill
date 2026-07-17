@@ -8,13 +8,14 @@
   "scripts": {
     "mock-skill": "node ./bin/mock-skill.js",
     "install:local": "bash ./scripts/install.sh",
-    "test": "node --test test/cors.test.js test/match-rule.test.js test/case-resolve.test.js test/scenario.test.js test/materialize.test.js test/mock-router-cases.test.js test/proxy-inject-case.test.js test/start-session-proxy.test.js test/infer-adapter.test.js",
+    "test": "node --test test/cors.test.js test/match-rule.test.js test/case-resolve.test.js test/scenario.test.js test/materialize.test.js test/mock-router-cases.test.js test/proxy-inject-case.test.js test/start-session-proxy.test.js test/infer-adapter.test.js test/usage-io-destructure.test.js test/capture-merge.test.js test/usage-export-patterns.test.js test/generate-prune.test.js",
     "test:smoke": "node scripts/run-fixture-smoke.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@faker-js/faker": "^9.9.0",
     "express": "^4.21.2",
     "http-proxy": "^1.18.1",
     "ts-morph": "^24.0.0"

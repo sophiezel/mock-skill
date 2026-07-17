@@ -377,6 +377,103 @@ function cleanupGatewayOnlyMocks(projectSlug) {
   return removed;
 }
 
+function rmEmptyParents(startDir, stopDir) {
+  let cur = startDir;
+  while (cur && cur.startsWith(stopDir) && cur !== stopDir) {
+    try {
+      fs.rmdirSync(cur);
+    } catch {
+      break;
+    }
+    cur = path.dirname(cur);
+  }
+}
+
+/**
+ * After --force generate: delete handlers/contracts not in this round's whitelist
+ * and without mock-skill:manual. Handlers whitelist = proxy-rules; contracts =
+ * all apiKeys written this round (including contract-only skips).
+ */
+function pruneOrphanArtifacts(projectSlug, { keepHandlerKeys, keepContractKeys }) {
+  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
+  const contractsDir = path.join(projectDataDir(projectSlug), 'contracts');
+  let prunedHandlers = 0;
+  let prunedContracts = 0;
+  const handlerKeep = keepHandlerKeys instanceof Set ? keepHandlerKeys : new Set(keepHandlerKeys || []);
+  const contractKeep =
+    keepContractKeys instanceof Set ? keepContractKeys : new Set(keepContractKeys || []);
+
+  if (fs.existsSync(mocksRoot)) {
+    function walkMocks(dir, host, parts) {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          walkMocks(full, host, [...parts, ent.name]);
+        } else if (ent.name === 'index.js') {
+          const p = '/' + parts.join('/');
+          const candidates = [
+            `GET ${host}${p}`,
+            `POST ${host}${p}`,
+            `PUT ${host}${p}`,
+            `DELETE ${host}${p}`,
+            `PATCH ${host}${p}`,
+          ];
+          if (candidates.some((k) => handlerKeep.has(k))) continue;
+          let content = '';
+          try {
+            content = fs.readFileSync(full, 'utf8');
+          } catch {
+            continue;
+          }
+          if (content.includes('mock-skill:manual')) continue;
+          fs.unlinkSync(full);
+          prunedHandlers++;
+          rmEmptyParents(path.dirname(full), mocksRoot);
+        }
+      }
+    }
+    for (const hostEnt of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
+      if (!hostEnt.isDirectory()) continue;
+      walkMocks(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
+    }
+  }
+
+  if (fs.existsSync(contractsDir)) {
+    for (const f of fs.readdirSync(contractsDir)) {
+      if (!f.endsWith('.json')) continue;
+      const full = path.join(contractsDir, f);
+      let c;
+      try {
+        c = JSON.parse(fs.readFileSync(full, 'utf8'));
+      } catch {
+        continue;
+      }
+      const id = c.id || apiKey(c);
+      if (contractKeep.has(id)) continue;
+      if (c.manual === true || c['mock-skill:manual'] === true) continue;
+      // Preserve contracts that still have a manual handler on disk
+      const handlerFile = mockHandlerPath(
+        projectSlug,
+        c.host || '_default',
+        c.path || '/',
+      );
+      if (fs.existsSync(handlerFile)) {
+        try {
+          if (fs.readFileSync(handlerFile, 'utf8').includes('mock-skill:manual')) {
+            continue;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      fs.unlinkSync(full);
+      prunedContracts++;
+    }
+  }
+
+  return { prunedHandlers, prunedContracts };
+}
+
 function generateMocks({
   projectSlug,
   roles,
@@ -398,9 +495,28 @@ function generateMocks({
   let usageBackedCount = 0;
   let emptyDataCount = 0;
   let enumBackedCount = 0;
+  let skippedEmptyCount = 0;
+  let prunedHandlers = 0;
+  let prunedContracts = 0;
   const gapApis = [];
   const blocked = [];
   const rules = [];
+  /** Contracts written this round (including contract-only skips) */
+  const keepContractKeys = new Set();
+
+  /**
+   * Empty shape + weak usage signal → contract only (no handler / proxy rule).
+   * Gaps: no_export_symbol | no_property_access | no_callsite
+   */
+  function isEmptyContractOnly(contract) {
+    if (contract.response?.source !== 'empty') return false;
+    const gaps = contract.coverage?.gaps || [];
+    return (
+      gaps.includes('no_export_symbol') ||
+      gaps.includes('no_property_access') ||
+      gaps.includes('no_callsite')
+    );
+  }
 
   // Skip roles that are still gateway-only
   const filteredRoles = roles.filter((r) => {
@@ -445,6 +561,7 @@ function generateMocks({
         contractPath(projectSlug, key),
         `${JSON.stringify(contract, null, 2)}\n`,
       );
+      keepContractKeys.add(key);
       if (contract.response?.source === 'usage') usageBackedCount++;
       else emptyDataCount++;
       if (contract.coverage?.enums?.length) enumBackedCount++;
@@ -452,12 +569,16 @@ function generateMocks({
         gapApis.push({ id: key, gaps: contract.coverage.gaps });
       }
       reused++;
-      rules.push({
-        id: key,
-        host: roleEntry.host === '_default' ? '*' : roleEntry.host,
-        pathPrefix: roleEntry.path,
-        methods: [roleEntry.method || 'GET'],
-      });
+      if (!isEmptyContractOnly(contract)) {
+        rules.push({
+          id: key,
+          host: roleEntry.host === '_default' ? '*' : roleEntry.host,
+          pathPrefix: roleEntry.path,
+          methods: [roleEntry.method || 'GET'],
+        });
+      } else {
+        skippedEmptyCount++;
+      }
       continue;
     }
 
@@ -479,6 +600,20 @@ function generateMocks({
     const cPath = contractPath(projectSlug, key);
     fs.mkdirSync(path.dirname(cPath), { recursive: true });
     fs.writeFileSync(cPath, `${JSON.stringify(contract, null, 2)}\n`);
+    keepContractKeys.add(key);
+
+    // Gate: empty + weak gaps → contract only, no empty handler / proxy rule
+    if (isEmptyContractOnly(contract)) {
+      skippedEmptyCount++;
+      appendAudit(projectSlug, {
+        command: 'generate',
+        taskId,
+        apiKey: key,
+        role: roleEntry.role,
+        summary: 'skipped-empty-handler',
+      });
+      continue;
+    }
 
     if (hasHandler && merge && !force && roleEntry.role === 'modify') {
       const prev = fs.readFileSync(handlerFile, 'utf8');
@@ -513,6 +648,16 @@ function generateMocks({
   const rulesPath = path.join(projectDataDir(projectSlug), 'proxy-rules.json');
   fs.writeFileSync(rulesPath, `${JSON.stringify(rules, null, 2)}\n`);
 
+  if (force) {
+    const keepHandlerKeys = new Set(rules.map((r) => r.id));
+    const pruned = pruneOrphanArtifacts(projectSlug, {
+      keepHandlerKeys,
+      keepContractKeys,
+    });
+    prunedHandlers = pruned.prunedHandlers;
+    prunedContracts = pruned.prunedContracts;
+  }
+
   return {
     generated,
     skipped,
@@ -523,6 +668,9 @@ function generateMocks({
     usageBackedCount,
     emptyDataCount,
     enumBackedCount,
+    skippedEmptyCount,
+    prunedHandlers,
+    prunedContracts,
     gapApis,
     gatewayFilteredRoles: roles.length - filteredRoles.length,
   };
@@ -535,6 +683,7 @@ module.exports = {
   loadExistingContracts,
   listExistingMockKeys,
   cleanupGatewayOnlyMocks,
+  pruneOrphanArtifacts,
 };
 
 if (require.main === module) {

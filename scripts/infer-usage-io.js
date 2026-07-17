@@ -89,6 +89,8 @@ function getPropertyAccessChain(node) {
   return parts;
 }
 
+const ENVELOPE_KEYS = new Set(['code', 'message', 'msg', 'success', 'error']);
+
 function unwrapDataPrefix(parts) {
   // res.data.foo → foo; data.foo → foo
   if (parts[0] === 'res' && parts[1] === 'data') return parts.slice(2);
@@ -98,6 +100,203 @@ function unwrapDataPrefix(parts) {
   return parts.slice(1); // drop root binding name
 }
 
+/** True when original access path is under an explicit response `.data` segment. */
+function isUnderDataPath(parts) {
+  if (!parts || !parts.length) return false;
+  if (parts[0] === 'data') return true;
+  if (parts[0] === 'res' && parts[1] === 'data') return true;
+  if (parts[0] === 'response' && parts[1] === 'data') return true;
+  if (parts[0] === 'result' && parts[1] === 'data') return true;
+  return false;
+}
+
+/**
+ * Reject envelope keys at shape root unless the source path was under `.data`.
+ * Prevents `res.code` → shape.code pollution while allowing `res.data.code`.
+ */
+function shouldRejectEnvelopeField(fullPath, shapePath) {
+  if (!shapePath || !shapePath.length) return false;
+  if (!ENVELOPE_KEYS.has(shapePath[0])) return false;
+  return !isUnderDataPath(fullPath);
+}
+
+/**
+ * Register a receiver by its definition name node (Identifier on
+ * BindingElement / Parameter / VariableDeclaration). Also stores the parent
+ * declaration so getDefinitionNodes() hits match either form.
+ * @param {Set<object>} receiverDefs
+ * @param {object} nameNode
+ */
+function registerReceiver(receiverDefs, nameNode) {
+  if (!nameNode || !receiverDefs) return;
+  try {
+    receiverDefs.add(nameNode);
+    const parent = nameNode.getParent?.();
+    if (parent) {
+      const kind = parent.getKindName();
+      if (
+        kind === 'BindingElement' ||
+        kind === 'Parameter' ||
+        kind === 'VariableDeclaration'
+      ) {
+        receiverDefs.add(parent);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * True if identifier's definition nodes intersect registered receivers.
+ * Same textual name with a different definition (e.g. useState `data` vs
+ * `.then(({ data })`) never matches.
+ */
+function isRegisteredReceiver(idNode, receiverDefs) {
+  if (!idNode || !receiverDefs || !receiverDefs.size) return false;
+  if (idNode.getKindName() !== 'Identifier') return false;
+  try {
+    if (receiverDefs.has(idNode)) return true;
+    const defs = idNode.getDefinitionNodes?.() || [];
+    for (const d of defs) {
+      if (receiverDefs.has(d)) return true;
+      if (d.getNameNode) {
+        const nn = d.getNameNode();
+        if (nn && receiverDefs.has(nn)) return true;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+/** Root Identifier of a PropertyAccessExpression chain, or null. */
+function getPropertyAccessRootIdentifier(node) {
+  let cur = node;
+  while (cur) {
+    const kind = cur.getKindName();
+    if (kind === 'PropertyAccessExpression') {
+      cur = cur.getExpression();
+    } else if (kind === 'Identifier') {
+      return cur;
+    } else {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract receiver defs + shape fields from a .then() callback parameter.
+ * Handles: (res) => ...  and  ({ data }) => ...  and  ({ data: { x } }) => ...
+ */
+function collectBindingFromParam(param, receiverDefs, shape, responsePaths) {
+  try {
+    const nameNode = param.getNameNode();
+    if (!nameNode) return;
+    if (nameNode.getKindName() === 'Identifier') {
+      registerReceiver(receiverDefs, nameNode);
+      return;
+    }
+    if (nameNode.getKindName() === 'ObjectBindingPattern') {
+      for (const be of nameNode.getElements()) {
+        collectBindingElement(be, [], receiverDefs, shape, responsePaths);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Process one BindingElement at a given shape-path prefix.
+ * Registers destructured API fields in the shape.
+ * Only envelope bindings (e.g. `{ data }` / `{ data: payload }` where unwrap yields
+ * empty path) become receivers — leaf fields like `city_id` must NOT, or UI renames
+ * (setData({ cityId })) get confused with response roots.
+ */
+function collectBindingElement(be, prefixPath, receiverDefs, shape, responsePaths) {
+  try {
+    if (be.getKindName() !== 'BindingElement') return;
+    const propNameNode = be.getPropertyNameNode();
+    const boundNode = be.getNameNode();
+    // Property name from source object; falls back to bound name when shorthand.
+    const propName = propNameNode ? propNameNode.getText() : boundNode?.getText();
+    if (!propName) return;
+    const fullPath = [...prefixPath, propName];
+    // Register in shape (unwrap data-prefix convention: shape root = response.data)
+    const shapePath = unwrapDataPrefix(fullPath);
+    if (shapePath.length && !shouldRejectEnvelopeField(fullPath, shapePath)) {
+      ensureProp(shape, shapePath);
+      responsePaths.push(shapePath.join('.'));
+    }
+    // Nested destructuring: { data: { x } }
+    if (boundNode && boundNode.getKindName() === 'ObjectBindingPattern') {
+      for (const nested of boundNode.getElements()) {
+        collectBindingElement(nested, fullPath, receiverDefs, shape, responsePaths);
+      }
+    } else if (boundNode && boundNode.getKindName() === 'Identifier') {
+      // Envelope payload only: .then(({ data }) =>) / ({ data: payload }) =>
+      // Do NOT register error/code/message/success as receivers.
+      const PAYLOAD = new Set(['data', 'result', 'payload']);
+      if (shapePath.length === 0 && PAYLOAD.has(propName)) {
+        registerReceiver(receiverDefs, boundNode);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Resolve the receiver identifier from a VariableDeclaration initializer,
+ * handling `data || {}` / `data ?? {}` fallback patterns.
+ * Returns the init Identifier when it resolves to a registered receiver def.
+ */
+function resolveReceiverInit(init, receiverDefs) {
+  if (!init) return null;
+  if (init.getKindName() === 'Identifier') {
+    return isRegisteredReceiver(init, receiverDefs) ? init : null;
+  }
+  if (init.getKindName() === 'BinaryExpression') {
+    const op = init.getOperatorToken?.()?.getText();
+    if (op === '||' || op === '??') {
+      const left = init.getLeft();
+      if (left.getKindName() === 'Identifier' && isRegisteredReceiver(left, receiverDefs)) {
+        return left;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Walk projectDir for .vue files (excluding node_modules, tests, etc.).
+ */
+function walkVue(dir, out = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  const SKIP = new Set([
+    'node_modules', 'dist', 'build', '.git', 'coverage', '.next', 'vendor', '.data', '__tests__',
+  ]);
+  for (const ent of entries) {
+    if (ent.name.startsWith('.') && ent.name !== '.env') continue;
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      if (SKIP.has(ent.name)) continue;
+      walkVue(full, out);
+    } else if (path.extname(ent.name) === '.vue') {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
 /**
  * @param {string} projectDir
  * @param {Array} apis
@@ -105,8 +304,12 @@ function unwrapDataPrefix(parts) {
 function enrichApisWithUsageIo(projectDir, apis) {
   let Project;
   let SyntaxKind;
+  let ScriptTarget;
+  let ModuleKind;
+  let ModuleResolutionKind;
   try {
-    ({ Project, SyntaxKind } = require('ts-morph'));
+    ({ Project, SyntaxKind, ScriptTarget, ModuleKind, ModuleResolutionKind } =
+      require('ts-morph'));
   } catch (e) {
     throw new Error(`ts-morph not installed: ${e.message}`);
   }
@@ -122,11 +325,11 @@ function enrichApisWithUsageIo(projectDir, apis) {
         compilerOptions: {
           allowJs: true,
           checkJs: false,
-          jsx: 'react',
+          jsx: 2, // JsxEmit.React
           noEmit: true,
-          target: 'ES2020',
-          module: 'ESNext',
-          moduleResolution: 'node',
+          target: ScriptTarget.ES2020,
+          module: ModuleKind.ESNext,
+          moduleResolution: ModuleResolutionKind.NodeJs,
         },
       });
 
@@ -140,6 +343,30 @@ function enrichApisWithUsageIo(projectDir, apis) {
         `!**/*.spec.*`,
       ]);
     }
+  }
+
+  // Add .vue script blocks as virtual source files so ts-morph can resolve
+  // references across service ↔ page boundaries within the same Project.
+  const { extractVueScriptBlocks, virtualScriptPath } = require('../lib/vue-script');
+  const vueFiles = walkVue(projectDir);
+  for (const vueFile of vueFiles) {
+    let vueContent;
+    try {
+      vueContent = fs.readFileSync(vueFile, 'utf8');
+    } catch {
+      continue;
+    }
+    const blocks = extractVueScriptBlocks(vueContent);
+    const rel = path.relative(projectDir, vueFile).replace(/\\/g, '/');
+    blocks.forEach((blk, i) => {
+      if (!blk.content || !blk.content.trim()) return;
+      const vPath = path.join(projectDir, virtualScriptPath(rel, i, blk.lang));
+      try {
+        project.createSourceFile(vPath, blk.content, { overwrite: true });
+      } catch {
+        /* ignore duplicate */
+      }
+    });
   }
 
   // Index export name → api keys
@@ -157,11 +384,11 @@ function enrichApisWithUsageIo(projectDir, apis) {
 
   const sourceFiles = project.getSourceFiles().filter((sf) => {
     const fp = sf.getFilePath();
-    return (
-      fp.includes(`${path.sep}src${path.sep}`) &&
-      !fp.includes(`${path.sep}node_modules${path.sep}`) &&
-      !/\.(test|spec)\./.test(fp)
-    );
+    if (fp.includes(`${path.sep}node_modules${path.sep}`)) return false;
+    if (/\.(test|spec)\./.test(fp)) return false;
+    // Include src/ files and virtual .vue script files (path contains .vue.__script)
+    if (fp.includes('.vue.__script')) return true;
+    return fp.includes(`${path.sep}src${path.sep}`);
   });
 
   // Build declaration map: export name → Node
@@ -171,6 +398,33 @@ function enrichApisWithUsageIo(projectDir, apis) {
       const [name, decls] = decl;
       if (!exportToApis.has(name)) continue;
       if (decls[0]) exportDecls.set(name, decls[0]);
+    }
+  }
+
+  // Fallback: exportHint may be a local binding used in `export default { name }`
+  // without a named export — resolve VariableDeclaration / FunctionDeclaration by name.
+  for (const name of exportToApis.keys()) {
+    if (exportDecls.has(name)) continue;
+    for (const sf of sourceFiles) {
+      let found = null;
+      for (const vd of sf.getVariableDeclarations()) {
+        if (vd.getName() === name) {
+          found = vd;
+          break;
+        }
+      }
+      if (!found) {
+        for (const fn of sf.getFunctions()) {
+          if (fn.getName() === name) {
+            found = fn;
+            break;
+          }
+        }
+      }
+      if (found) {
+        exportDecls.set(name, found);
+        break;
+      }
     }
   }
 
@@ -185,9 +439,59 @@ function enrichApisWithUsageIo(projectDir, apis) {
     const responsePaths = [];
     const enums = [];
     const gaps = new Set();
-    const receiverNames = new Set(); // detail, res, data...
+    /** @type {Map<string, Set<object>>} filePath → response receiver definition nodes */
+    const receiversByFile = new Map();
     let hasCall = false;
     let dynamicKeyRisk = false;
+
+    function fileReceivers(sf) {
+      const fp = sf.getFilePath();
+      if (!receiversByFile.has(fp)) receiversByFile.set(fp, new Set());
+      return receiversByFile.get(fp);
+    }
+
+    function registerAssignmentReceiver(localReceivers, leftOrDecl) {
+      if (!leftOrDecl) return;
+      try {
+        if (leftOrDecl.getKindName() === 'VariableDeclaration') {
+          const nn = leftOrDecl.getNameNode();
+          if (!nn) return;
+          // const data = await api()
+          if (nn.getKindName() === 'Identifier') {
+            registerReceiver(localReceivers, nn);
+            return;
+          }
+          // const { error, data } = await api()  — envelope BindingElements
+          if (nn.getKindName() === 'ObjectBindingPattern') {
+            for (const be of nn.getElements()) {
+              collectBindingElement(be, [], localReceivers, shape, responsePaths);
+            }
+          }
+          return;
+        }
+        if (leftOrDecl.getKindName() === 'Identifier') {
+          const defs = leftOrDecl.getDefinitionNodes?.() || [];
+          if (defs.length) {
+            for (const d of defs) {
+              if (d.getNameNode) {
+                const nn = d.getNameNode();
+                if (nn && nn.getKindName() === 'Identifier') {
+                  registerReceiver(localReceivers, nn);
+                } else {
+                  registerReceiver(localReceivers, d);
+                }
+              } else {
+                registerReceiver(localReceivers, d);
+              }
+            }
+          } else {
+            registerReceiver(localReceivers, leftOrDecl);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
 
     let refs = [];
     try {
@@ -214,6 +518,7 @@ function enrichApisWithUsageIo(projectDir, apis) {
       }
       if (call && call.getKindName() === 'CallExpression') {
         hasCall = true;
+        const localReceivers = fileReceivers(ref.getSourceFile());
         const args = call.getArguments();
         for (const arg of args) {
           if (arg.getKindName() === 'ObjectLiteralExpression') {
@@ -228,9 +533,6 @@ function enrichApisWithUsageIo(projectDir, apis) {
             try {
               const defs = arg.getDefinitionNodes?.() || [];
               for (const d of defs) {
-                const init =
-                  d.getInitializer?.() ||
-                  d.getFirstAncestorByKind?.(SyntaxKind.VariableDeclaration)?.getInitializer?.();
                 // VariableDeclaration
                 if (d.getKindName() === 'VariableDeclaration') {
                   const i = d.getInitializer();
@@ -252,7 +554,7 @@ function enrichApisWithUsageIo(projectDir, apis) {
           }
         }
 
-        // .then((res) => ...)
+        // .then((res) => ...) or .then(({ data }) => ...)
         const callParent = call.getParent();
         if (
           callParent &&
@@ -264,77 +566,44 @@ function enrichApisWithUsageIo(projectDir, apis) {
             const cb = thenCall.getArguments()[0];
             if (cb && (cb.getKindName() === 'ArrowFunction' || cb.getKindName() === 'FunctionExpression')) {
               const params = cb.getParameters();
-              if (params[0]) receiverNames.add(params[0].getName());
+              if (params[0]) {
+                collectBindingFromParam(params[0], localReceivers, shape, responsePaths);
+              }
             }
           }
         }
 
-        // await getXxx() assigned
+        // await getXxx() assigned — register definition nodes, not bare names
         let walk = call.getParent();
         if (walk && walk.getKindName() === 'AwaitExpression') walk = walk.getParent();
         if (walk && walk.getKindName() === 'BinaryExpression') {
           const left = walk.getLeft?.() || walk.getChildren()[0];
-          if (left && left.getKindName() === 'Identifier') {
-            receiverNames.add(left.getText());
-          }
+          registerAssignmentReceiver(localReceivers, left);
         }
         if (walk && walk.getKindName() === 'VariableDeclaration') {
-          const name = walk.getName();
-          if (name) receiverNames.add(name.replace(/[{}\s]/g, '').split(',')[0]);
-        }
-        // setDetail(res) / setDetail(res.data)
-        if (call.getKindName() === 'CallExpression') {
-          /* already handled */
+          registerAssignmentReceiver(localReceivers, walk);
         }
       }
-
-      // setState(apiResult) — CallExpression where arg contains ref? skip
-
-      // Property access where identifier is export — rare
     }
 
-    // Find setX from useState when then/await sets it — scan files that import export
+    // Scan files that reference the export — receivers are per-file to avoid
+    // FileA `.then(({ data })` enabling FileB UI `data.cityId` pollution.
     const importFiles = new Set();
     for (const ref of refs) {
       importFiles.add(ref.getSourceFile());
     }
 
     for (const sf of importFiles) {
-      // Heuristic: getTaskDetail(...).then(res => setDetail(res / res.data))
       const text = sf.getFullText();
       if (!text.includes(exportName)) continue;
+      const receiverDefs = fileReceivers(sf);
 
-      // useState pair: [detail, setDetail]
-      const stateRe =
-        /const\s*\[\s*(\w+)\s*,\s*(set\w+)\s*\]\s*=\s*useState/g;
-      let sm;
-      const setters = new Map();
-      while ((sm = stateRe.exec(text))) {
-        setters.set(sm[2], sm[1]);
-      }
-
-      // setDetail( something with export or res )
-      for (const [setter, stateName] of setters) {
-        if (new RegExp(`${setter}\\s*\\(`).test(text) && text.includes(exportName)) {
-          // If export is used in same file as setter, treat stateName as receiver
-          receiverNames.add(stateName);
-        }
-      }
-
-      // Always track common names if call exists in file
-      if (hasCall || text.includes(`${exportName}(`)) {
-        receiverNames.add('res');
-        receiverNames.add('data');
-        receiverNames.add('result');
-        receiverNames.add('response');
-      }
-
-      // Collect property accesses
+      // Collect property accesses — match by definition node, not name string
       for (const pa of sf.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
         const chain = getPropertyAccessChain(pa);
         if (!chain || chain.length < 2) continue;
-        const root = chain[0];
-        if (!receiverNames.has(root)) continue;
+        const rootId = getPropertyAccessRootIdentifier(pa);
+        if (!rootId || !isRegisteredReceiver(rootId, receiverDefs)) continue;
 
         // Skip .then .catch .data alone
         const rest = unwrapDataPrefix(chain);
@@ -342,6 +611,7 @@ function enrichApisWithUsageIo(projectDir, apis) {
         if (rest[0] === 'then' || rest[0] === 'catch' || rest[0] === 'finally') {
           continue;
         }
+        if (shouldRejectEnvelopeField(chain, rest)) continue;
 
         // Mark array if .map/.length/.filter on last-1
         const copy = [...rest];
@@ -365,6 +635,19 @@ function enrichApisWithUsageIo(projectDir, apis) {
         }
       }
 
+      // Destructuring: const { a, b } = data  /  const { x } = res.data
+      for (const vd of sf.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+        const nameNode = vd.getNameNode();
+        if (!nameNode || nameNode.getKindName() !== 'ObjectBindingPattern') continue;
+        const init = vd.getInitializer();
+        const srcId = resolveReceiverInit(init, receiverDefs);
+        if (!srcId) continue;
+        const srcName = srcId.getText();
+        for (const be of nameNode.getElements()) {
+          collectBindingElement(be, [srcName], receiverDefs, shape, responsePaths);
+        }
+      }
+
       // Enums: status === 1, detail.status === 'x'
       for (const bin of sf.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
         try {
@@ -376,8 +659,12 @@ function enrichApisWithUsageIo(projectDir, apis) {
           let lit = null;
           if (left.getKindName() === 'PropertyAccessExpression') {
             const chain = getPropertyAccessChain(left);
-            if (chain && receiverNames.has(chain[0])) {
-              fieldPath = unwrapDataPrefix(chain).join('.');
+            const rootId = getPropertyAccessRootIdentifier(left);
+            if (chain && rootId && isRegisteredReceiver(rootId, receiverDefs)) {
+              const rest = unwrapDataPrefix(chain);
+              if (rest.length && !shouldRejectEnvelopeField(chain, rest)) {
+                fieldPath = rest.join('.');
+              }
             }
             if (
               right.getKindName() === 'StringLiteral' ||
@@ -403,8 +690,11 @@ function enrichApisWithUsageIo(projectDir, apis) {
           const expr = sw.getExpression();
           if (expr.getKindName() !== 'PropertyAccessExpression') continue;
           const chain = getPropertyAccessChain(expr);
-          if (!chain || !receiverNames.has(chain[0])) continue;
-          const fieldPath = unwrapDataPrefix(chain).join('.');
+          const rootId = getPropertyAccessRootIdentifier(expr);
+          if (!chain || !rootId || !isRegisteredReceiver(rootId, receiverDefs)) continue;
+          const rest = unwrapDataPrefix(chain);
+          if (!rest.length || shouldRejectEnvelopeField(chain, rest)) continue;
+          const fieldPath = rest.join('.');
           for (const clause of sw.getClauses()) {
             if (clause.getKindName() !== 'CaseClause') continue;
             const ce = clause.getExpression();
@@ -431,9 +721,10 @@ function enrichApisWithUsageIo(projectDir, apis) {
           if (!init) continue;
           const expr = init.getExpression?.() || init;
           if (expr && expr.getKindName() === 'Identifier') {
-            const id = expr.getText();
-            if (receiverNames.has(id) && (name === id || name === 'data' || name === 'detail' || name === 'info')) {
-              // resolve component file — limited: search imported component
+            if (
+              isRegisteredReceiver(expr, receiverDefs) &&
+              (name === expr.getText() || name === 'data' || name === 'detail' || name === 'info')
+            ) {
               gaps.add('props_shallow_only');
             }
           }

@@ -19,5 +19,6 @@
     "analytics.",
     "log.",
     "track."
-  ]
+  ],
+  "denyPathSubstrings": []
 }

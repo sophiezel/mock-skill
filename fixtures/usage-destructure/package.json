@@ -1,0 +1,6 @@
+{
+  "name": "usage-destructure-fixture",
+  "version": "1.0.0",
+  "description": "Fixture for destructuring-based response shape inference (JS + Vue).",
+  "private": true
+}

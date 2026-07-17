@@ -14,6 +14,7 @@ const {
 } = require('../lib/paths');
 const { appendAudit } = require('../lib/audit');
 const { renderHandler, loadExistingContracts } = require('./generate-mock');
+const { isPlaceholderValue } = require('../lib/materialize');
 
 function deepMergeShape(target, sample) {
   if (sample == null) return target;
@@ -42,6 +43,11 @@ function deepMergeShape(target, sample) {
   return { type: 'object', props };
 }
 
+/**
+ * Merge capture data into existing mock data.
+ * Real capture wins over null/''/faker placeholders; nested objects recurse.
+ * New keys from real response are added (they are API fields, not invented).
+ */
 function mergeDataAdditive(existing, incoming) {
   if (incoming == null) return existing;
   if (existing == null) return incoming;
@@ -52,12 +58,27 @@ function mergeDataAdditive(existing, incoming) {
       mergeDataAdditive(existing[0] || {}, incoming[0]),
     ];
   }
-  if (typeof incoming !== 'object') return existing ?? incoming;
+  if (typeof incoming !== 'object') {
+    // Scalar: real capture always preferred over placeholder / prior sample
+    if (isPlaceholderValue(existing)) return incoming;
+    return incoming;
+  }
   const out = { ...existing };
   for (const [k, v] of Object.entries(incoming)) {
-    if (!(k in out) || out[k] == null || out[k] === '') {
+    if (!(k in out) || isPlaceholderValue(out[k])) {
       out[k] = v;
-    } else if (typeof v === 'object' && typeof out[k] === 'object') {
+    } else if (
+      v != null &&
+      typeof v === 'object' &&
+      typeof out[k] === 'object' &&
+      !Array.isArray(v) &&
+      !Array.isArray(out[k])
+    ) {
+      out[k] = mergeDataAdditive(out[k], v);
+    } else if (typeof v !== 'object' || v === null) {
+      // Real leaf overwrites faker/init sample
+      out[k] = v;
+    } else if (Array.isArray(v)) {
       out[k] = mergeDataAdditive(out[k], v);
     }
   }

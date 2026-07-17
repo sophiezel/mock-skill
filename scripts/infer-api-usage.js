@@ -13,13 +13,27 @@ const SKIP_DIRS = new Set([
   'vendor',
   '.data',
   '__tests__',
+  '__mocks__',
+  'e2e',
+  'tests',
 ]);
 
-const EXT = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
+const EXT = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue']);
 const STATIC_EXT =
   /\.(mp3|mp4|png|jpe?g|gif|webp|svg|css|woff2?|ttf|ico|map|pdf)(\?.*)?$/i;
+const TEST_FILE_RE = /\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$/i;
+const REQ_CTX_RE =
+  /\b(createRequest|fetch\s*\(|axios\.|request\.(get|post|put|delete|patch)\s*\()/;
 
-function walk(dir, out = []) {
+function shouldSkipFile(relPath, fileName) {
+  const norm = relPath.replace(/\\/g, '/');
+  if (TEST_FILE_RE.test(fileName)) return true;
+  if (/(^|\/)(e2e|__mocks__)(\/|$)/i.test(norm)) return true;
+  if (/(^|\/)src\/mock(\/|$)/i.test(norm)) return true;
+  return false;
+}
+
+function walk(dir, out = [], rootDir = dir) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -31,8 +45,12 @@ function walk(dir, out = []) {
     const full = path.join(dir, ent.name);
     if (ent.isDirectory()) {
       if (SKIP_DIRS.has(ent.name)) continue;
-      walk(full, out);
+      // Also skip dirs named mock at project root / src/mock already covered by name
+      if (ent.name === 'mock' || ent.name === 'mocks') continue;
+      walk(full, out, rootDir);
     } else if (EXT.has(path.extname(ent.name))) {
+      const rel = path.relative(rootDir, full);
+      if (shouldSkipFile(rel, ent.name)) continue;
       out.push(full);
     }
   }
@@ -139,6 +157,147 @@ function isStaticAsset(pathname) {
 }
 
 /**
+ * Scan helper: skip strings / comments; track (), {}, <> depth.
+ * Used to locate function bodies past long TS parameter / return types.
+ */
+function createScanState() {
+  return {
+    inStr: null,
+    escape: false,
+    inLineComment: false,
+    inBlockComment: false,
+    paren: 0,
+    brace: 0,
+    angle: 0,
+  };
+}
+
+function scanStep(content, i, st) {
+  const ch = content[i];
+  const next = content[i + 1];
+  if (st.inLineComment) {
+    if (ch === '\n') st.inLineComment = false;
+    return;
+  }
+  if (st.inBlockComment) {
+    if (ch === '*' && next === '/') {
+      st.inBlockComment = false;
+      return 1; // skip extra
+    }
+    return;
+  }
+  if (st.inStr) {
+    if (st.escape) {
+      st.escape = false;
+      return;
+    }
+    if (ch === '\\') {
+      st.escape = true;
+      return;
+    }
+    if (ch === st.inStr) st.inStr = null;
+    return;
+  }
+  if (ch === '/' && next === '/') {
+    st.inLineComment = true;
+    return 1;
+  }
+  if (ch === '/' && next === '*') {
+    st.inBlockComment = true;
+    return 1;
+  }
+  if (ch === "'" || ch === '"' || ch === '`') {
+    st.inStr = ch;
+    return;
+  }
+  if (ch === '(') st.paren++;
+  else if (ch === ')') st.paren--;
+  else if (ch === '{') st.brace++;
+  else if (ch === '}') st.brace--;
+  else if (ch === '<') st.angle++;
+  else if (ch === '>' && st.angle > 0) st.angle--;
+}
+
+/**
+ * Locate `{...}` function body after `function Name(…)` / optional TS return type.
+ * Skips param object types and return types that contain braces.
+ * @returns {string|null}
+ */
+function extractFunctionBodyAfterParen(content, openParenIdx) {
+  if (!content || content[openParenIdx] !== '(') return null;
+  const st = createScanState();
+  st.paren = 1;
+  let i = openParenIdx + 1;
+  for (; i < content.length; i++) {
+    const skip = scanStep(content, i, st);
+    if (typeof skip === 'number') i += skip;
+    if (
+      !st.inStr &&
+      !st.inLineComment &&
+      !st.inBlockComment &&
+      st.paren === 0
+    ) {
+      i++;
+      break;
+    }
+  }
+  const rt = createScanState();
+  let seenColon = false;
+  for (; i < content.length; i++) {
+    const ch = content[i];
+    if (!seenColon) {
+      if (/\s/.test(ch)) continue;
+      if (ch === '{') return extractBalancedBlock(content, i);
+      if (ch === ':') {
+        seenColon = true;
+        continue;
+      }
+      continue;
+    }
+    // In return type — body `{` appears only when nest depths are all 0
+    if (
+      !rt.inStr &&
+      !rt.inLineComment &&
+      !rt.inBlockComment &&
+      rt.paren === 0 &&
+      rt.brace === 0 &&
+      rt.angle === 0 &&
+      ch === '{'
+    ) {
+      return extractBalancedBlock(content, i);
+    }
+    const skip = scanStep(content, i, rt);
+    if (typeof skip === 'number') i += skip;
+  }
+  return null;
+}
+
+/**
+ * Extract a `{ ... }` block starting at openBraceIdx (must point at `{`).
+ * @returns {string|null}
+ */
+function extractBalancedBlock(content, openBraceIdx) {
+  if (!content || content[openBraceIdx] !== '{') return null;
+  const st = createScanState();
+  for (let i = openBraceIdx; i < content.length; i++) {
+    const ch = content[i];
+    const skip = scanStep(content, i, st);
+    if (typeof skip === 'number') i += skip;
+    if (
+      !st.inStr &&
+      !st.inLineComment &&
+      !st.inBlockComment &&
+      st.brace === 0 &&
+      i > openBraceIdx
+    ) {
+      // scanStep already applied `}` → brace became 0
+      if (ch === '}') return content.slice(openBraceIdx, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
  * Extract APIs from one file using createRequest + path literals.
  */
 function extractCreateRequestApis(content, file, serviceBases) {
@@ -146,7 +305,7 @@ function extractCreateRequestApis(content, file, serviceBases) {
   const keyMap = new Map(serviceBases.map((b) => [b.key, b]));
   const varToKey = new Map();
 
-  // const xxx = request.createRequest({ key: "CARS_TASK" ...})
+  // const xxx = request.createRequest({ key: "SERVICE_KEY" ...})
   const createRe =
     /(?:const|let|var)\s+(\w+)\s*=\s*[^\n]*createRequest\s*\(\s*\{([^}]*)\}\s*\)/g;
   let m;
@@ -166,11 +325,11 @@ function extractCreateRequestApis(content, file, serviceBases) {
       continue;
     }
     const prefix =
-      prefixM && prefixM[1] === ''
-        ? ''
-        : prefixM
-          ? prefixM[1]
-          : base.prefix;
+      prefixM
+        ? prefixM[1] === ''
+          ? base.prefix // prefix: "" → still use env pathname for mock key
+          : prefixM[1]
+        : base.prefix;
     varToKey.set(varName, {
       key: base.key,
       host: base.host,
@@ -186,7 +345,7 @@ function extractCreateRequestApis(content, file, serviceBases) {
     );
     while ((m = callStrRe.exec(content))) {
       const uri = m[1].split('?')[0];
-      if (!uri.startsWith('/')) continue;
+      if (!uri.startsWith('/') || /\$\{/.test(uri)) continue;
       const fullPath = joinPrefix(base.prefix, uri);
       if (isGatewayOnlyPath(fullPath, serviceBases) || isStaticAsset(fullPath)) {
         continue;
@@ -309,6 +468,196 @@ function extractCreateRequestApis(content, file, serviceBases) {
     if (best) best.exportHint = exportName;
   }
 
+  // Track const VARNAME = reqVar("/path") → link to API entry for export { VARNAME }
+  const varNameToApi = new Map();
+  for (const [varName, base] of varToKey) {
+    const assignStrRe = new RegExp(
+      `(?:const|let|var)\\s+(\\w+)\\s*=\\s*\\b${varName}\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]\\s*\\)`,
+      'g',
+    );
+    while ((m = assignStrRe.exec(content))) {
+      const assignedVar = m[1];
+      const uri = m[2].split('?')[0];
+      if (!uri.startsWith('/')) continue;
+      const fullPath = joinPrefix(base.prefix, uri);
+      const hit = apis.find(
+        (a) =>
+          a.path === fullPath && a.host === (base.host || '_default'),
+      );
+      if (hit) varNameToApi.set(assignedVar, hit);
+    }
+    const assignObjRe = new RegExp(
+      `(?:const|let|var)\\s+(\\w+)\\s*=\\s*\\b${varName}\\s*\\(\\s*\\{([\\s\\S]*?)\\}\\s*\\)`,
+      'g',
+    );
+    while ((m = assignObjRe.exec(content))) {
+      const assignedVar = m[1];
+      const obj = m[2];
+      const uriM = obj.match(/uri\s*:\s*['"`]([^'"`]+)['"`]/);
+      if (!uriM) continue;
+      const uri = uriM[1].split('?')[0];
+      if (!uri.startsWith('/')) continue;
+      const typeM = obj.match(/type\s*:\s*['"`]([^'"`]+)['"`]/);
+      const method = (typeM ? typeM[1] : 'get').toUpperCase();
+      const fullPath = joinPrefix(base.prefix, uri);
+      const hit = apis.find(
+        (a) =>
+          a.path === fullPath &&
+          a.host === (base.host || '_default') &&
+          a.method === (method === 'FORM' ? 'POST' : method),
+      );
+      if (hit) varNameToApi.set(assignedVar, hit);
+    }
+  }
+
+  // export { a, b as c } — bind exportHint by local name
+  const exportListRe = /export\s*\{([^}]+)\}/g;
+  while ((m = exportListRe.exec(content))) {
+  // Skip re-exports: export { x } from '...'
+    const after = content.slice(m.index + m[0].length);
+    if (/^\s*from\s*['"`]/.test(after)) continue;
+    const specs = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    for (const spec of specs) {
+      const parts = spec.split(/\s+as\s+/);
+      const localName = parts[0].trim();
+      const exportName = parts[1]?.trim() || localName;
+      const hit = varNameToApi.get(localName);
+      if (hit && !hit.exportHint) hit.exportHint = exportName;
+    }
+  }
+
+  // Async / rename wrappers: find export function body, then search for inner call
+  // (no fixed char window — long TS param/return types must not break binding)
+  for (const [innerName, hit] of varNameToApi) {
+    if (hit.exportHint) continue;
+    const innerCall = new RegExp(`\\b${innerName}\\s*\\(`);
+    const fnRe = /export\s+(?:async\s+)?function\s+(\w+)\s*\(/g;
+    let fm;
+    while ((fm = fnRe.exec(content))) {
+      const exportName = fm[1];
+      const openParen = fm.index + fm[0].length - 1;
+      const body = extractFunctionBodyAfterParen(content, openParen);
+      if (body && innerCall.test(body)) {
+        hit.exportHint = exportName;
+        break;
+      }
+    }
+    if (hit.exportHint) continue;
+    const arrowRe =
+      /export\s+const\s+(\w+)\s*=\s*async\s*(?:\([^)]*\)|[\w]+)\s*(?::\s*[^=]+)?\s*=>/g;
+    while ((fm = arrowRe.exec(content))) {
+      const exportName = fm[1];
+      const after = content.slice(fm.index + fm[0].length);
+      const trimmed = after.replace(/^\s*/, '');
+      let body = null;
+      if (trimmed.startsWith('{')) {
+        body = extractBalancedBlock(
+          content,
+          fm.index + fm[0].length + (after.length - trimmed.length),
+        );
+      } else {
+        const m = trimmed.match(/^[^;\n]+/);
+        body = m ? m[0] : trimmed.slice(0, 400);
+      }
+      if (body && innerCall.test(body)) {
+        hit.exportHint = exportName;
+        break;
+      }
+    }
+  }
+
+  // Small wrapper: export const x = (data) => reqVar({ uri: "..." })(data)
+  // or export const x = (...) => innerReq(...)
+  const wrapRe =
+    /export\s+const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*(\w+)\s*\(/g;
+  while ((m = wrapRe.exec(content))) {
+    const exportName = m[1];
+    const callee = m[2];
+    const hit = varNameToApi.get(callee);
+    if (hit && !hit.exportHint) hit.exportHint = exportName;
+    else if (varToKey.has(callee)) {
+      // export const x = (d) => req({ uri })(d) — find nearby api without hint
+      const exportLine = content.slice(0, m.index).split(/\n/).length;
+      let best = null;
+      let bestDist = 8;
+      for (const api of apis) {
+        if (api.exportHint) continue;
+        const line = Number(String(api.evidence).split(':').pop());
+        const dist = Math.abs(line - exportLine);
+        if (dist < bestDist) {
+          best = api;
+          bestDist = dist;
+        }
+      }
+      if (best) best.exportHint = exportName;
+    }
+  }
+
+  // export default { getX, getY } — bind object keys that match local req bindings
+  const defaultObjRe = /export\s+default\s*\{([^}]+)\}/g;
+  while ((m = defaultObjRe.exec(content))) {
+    const keys = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    for (const key of keys) {
+      // support shorthand getX or getX: getX / getX: foo
+      const parts = key.split(':').map((s) => s.trim());
+      const exportName = parts[0].replace(/\s+/g, '');
+      const localName = (parts[1] || parts[0]).replace(/\s+/g, '');
+      if (!/^[A-Za-z_]\w*$/.test(exportName)) continue;
+      const hit = varNameToApi.get(localName);
+      if (hit && !hit.exportHint) hit.exportHint = exportName;
+    }
+  }
+
+  return apis;
+}
+
+/**
+ * request.get|post({ key: 'SERVICE_KEY', uri: '/api/...' })
+ */
+function extractRequestKeyUriApis(content, file, serviceBases) {
+  const apis = [];
+  const keyMap = new Map(serviceBases.map((b) => [b.key, b]));
+  const re =
+    /\brequest\.(get|post|put|delete|patch)\s*\(\s*\{([\s\S]*?)\}\s*\)/gi;
+  let m;
+  while ((m = re.exec(content))) {
+    const method = m[1].toUpperCase();
+    const obj = m[2];
+    const keyM = obj.match(/key\s*:\s*['"`]([^'"`]+)['"`]/);
+    const uriM = obj.match(/uri\s*:\s*['"`]([^'"`]+)['"`]/);
+    if (!keyM || !uriM) continue;
+    const uri = uriM[1].split('?')[0];
+    if (!uri.startsWith('/') || /\$\{/.test(uri)) continue;
+    const base = keyMap.get(keyM[1]);
+    const host = base?.host || '_default';
+    const fullPath = joinPrefix(base?.prefix || '', uri);
+    if (isGatewayOnlyPath(fullPath, serviceBases) || isStaticAsset(fullPath)) {
+      continue;
+    }
+    const line = content.slice(0, m.index).split(/\n/).length;
+    // Try to find export binding on same/nearby assignment
+    let exportHint = null;
+    const before = content.slice(Math.max(0, m.index - 120), m.index);
+    const assignM =
+      /(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*$/.exec(before) ||
+      /export\s+(?:async\s+)?function\s+(\w+)\s*\([^)]*\)\s*\{[^}]*$/.exec(
+        content.slice(Math.max(0, m.index - 200), m.index),
+      );
+    if (assignM) exportHint = assignM[1];
+    apis.push({
+      method,
+      host,
+      path: fullPath,
+      evidence: `${file}:${line}`,
+      confidence: base?.host ? 'high' : 'medium',
+      exportHint,
+      queryHints: [],
+      bodyHints: [],
+      responseHints: [],
+      responseShape: null,
+      serviceKey: keyM[1],
+    });
+  }
   return apis;
 }
 
@@ -458,9 +807,18 @@ function extractLegacyApis(content, file, serviceBases) {
   pathLiteralRe.lastIndex = 0;
   let pm;
   while ((pm = pathLiteralRe.exec(content))) {
-    const p = pm[1].split('?')[0];
+    const rawCap = pm[1];
+    // Drop template interpolations and incomplete paths
+    if (/\$\{/.test(rawCap)) continue;
+    const p = rawCap.split('?')[0];
     if (isGatewayOnlyPath(p, serviceBases)) continue;
-    // Resolve host from matching prefix
+    if (isStaticAsset(p)) continue;
+    // Require request-like context near the literal (avoid SPA navigate / JSDoc)
+    const ctxStart = Math.max(0, pm.index - 120);
+    const ctxEnd = Math.min(content.length, pm.index + rawCap.length + 80);
+    const ctx = content.slice(ctxStart, ctxEnd);
+    if (!REQ_CTX_RE.test(ctx)) continue;
+    // Resolve host from matching service-base prefix
     let host = '_default';
     for (const b of serviceBases) {
       if (b.prefix && (p === b.prefix || p.startsWith(`${b.prefix}/`))) {
@@ -509,21 +867,20 @@ function dedupe(apis) {
     exportHint: a.exportHints?.[0] || null,
   }));
 
-  // Drop _default/external/... when a fully-qualified host+prefix API exists for same suffix
-  const fullSuffixes = new Set(
-    list
-      .filter((a) => a.host && a.host !== '_default')
-      .map((a) => {
-        const idx = a.path.indexOf('/external/');
-        return idx >= 0 ? a.path.slice(idx) : a.path;
-      }),
-  );
+  // Drop _default twin when a real-host API already covers the same method+path
+  // (path equal, or real path ends with the _default path — no project-specific segments).
+  const qualified = list.filter((a) => a.host && a.host !== '_default');
   list = list.filter((a) => {
     if (a.host !== '_default') return true;
-    if (a.path.startsWith('/external/')) {
-      return !fullSuffixes.has(a.path);
-    }
-    return true;
+    // Low-confidence path literals without export binding are usually noise
+    if (a.confidence === 'low' && !a.exportHint) return false;
+    const method = a.method.toUpperCase();
+    const hasTwin = qualified.some(
+      (b) =>
+        b.method.toUpperCase() === method &&
+        (b.path === a.path || b.path.endsWith(a.path)),
+    );
+    return !hasTwin;
   });
   return list;
 }
@@ -545,6 +902,12 @@ function isDeniedHost(host, cfg) {
   if (suffixes.some((s) => h.endsWith(s.toLowerCase()))) return true;
   if (keywords.some((k) => h.includes(k.toLowerCase()))) return true;
   return false;
+}
+
+function isDeniedPath(pathname, cfg) {
+  if (!pathname) return false;
+  const subs = cfg?.denyPathSubstrings || [];
+  return subs.some((s) => pathname.includes(s));
 }
 
 function loadAdapter(name) {
@@ -580,6 +943,32 @@ function inferApiUsage(projectDir, opts = {}) {
     }
     if (content.length > 1_500_000) continue;
     const rel = path.relative(projectDir, file);
+    const isVue = path.extname(file) === '.vue';
+
+    // For .vue files, extract script blocks and run discover on each.
+    if (isVue) {
+      const { extractVueScriptBlocks } = require('../lib/vue-script');
+      const blocks = extractVueScriptBlocks(content);
+      for (const blk of blocks) {
+        const scriptContent = blk.content;
+        if (!scriptContent || !scriptContent.trim()) continue;
+        // Count abs URLs that are gateway-only in script content
+        const absRe2 = /(['"`])https?:\/\/([^'"`/?#]+)(\/[^'"`]*)?\1/g;
+        let m2;
+        while ((m2 = absRe2.exec(scriptContent))) {
+          const p = (m2[3] || '/').split('?')[0];
+          if (p && isGatewayOnlyPath(p, serviceBases)) gatewayFilteredCount++;
+        }
+        all.push(...extractCreateRequestApis(scriptContent, rel, serviceBases));
+        all.push(...extractRequestKeyUriApis(scriptContent, rel, serviceBases));
+        all.push(...extractLegacyApis(scriptContent, rel, serviceBases));
+        if (adapter && typeof adapter.extract === 'function') {
+          const extra = adapter.extract({ content: scriptContent, rel, serviceBases }) || [];
+          all.push(...extra);
+        }
+      }
+      continue;
+    }
 
     // Count abs URLs that are gateway-only
     const absRe = /(['"`])https?:\/\/([^'"`/?#]+)(\/[^'"`]*)?\1/g;
@@ -590,13 +979,8 @@ function inferApiUsage(projectDir, opts = {}) {
     }
 
     all.push(...extractCreateRequestApis(content, rel, serviceBases));
-    // Prefer services directory for createRequest; still run legacy for others
-    if (!/src\/services\//.test(rel.replace(/\\/g, '/'))) {
-      all.push(...extractLegacyApis(content, rel, serviceBases));
-    } else {
-      // Also catch literal /cars-task/external in services
-      all.push(...extractLegacyApis(content, rel, serviceBases));
-    }
+    all.push(...extractRequestKeyUriApis(content, rel, serviceBases));
+    all.push(...extractLegacyApis(content, rel, serviceBases));
     if (adapter && typeof adapter.extract === 'function') {
       const extra = adapter.extract({ content, rel, serviceBases }) || [];
       all.push(...extra);
@@ -604,14 +988,16 @@ function inferApiUsage(projectDir, opts = {}) {
   }
 
   const deduped = dedupe(all);
-  const filtered = deduped.filter((a) => !isDeniedHost(a.host, inferCfg));
+  const filtered = deduped.filter(
+    (a) => !isDeniedHost(a.host, inferCfg) && !isDeniedPath(a.path, inferCfg),
+  );
 
-  // Optionally enrich with ts-morph usage IO
+  // Optionally enrich with ts-morph usage IO (deny-filtered list only)
   let enriched = filtered;
   if (opts.withUsageIo !== false) {
     try {
       const { enrichApisWithUsageIo } = require('./infer-usage-io');
-      enriched = enrichApisWithUsageIo(projectDir, deduped);
+      enriched = enrichApisWithUsageIo(projectDir, filtered);
     } catch (err) {
       console.warn(
         `[mock-skill] usage-io enrich skipped: ${err.message}`,
@@ -639,6 +1025,8 @@ module.exports = {
   isGatewayOnlyPath,
   pathDepth,
   extractCreateRequestApis,
+  extractRequestKeyUriApis,
+  extractLegacyApis,
   loadAdapter,
 };
 

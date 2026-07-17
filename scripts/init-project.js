@@ -130,12 +130,20 @@ async function initProject(opts = {}) {
     `- removedGatewayOnly: ${gen.removedGateway || 0}`,
     `- usageBackedCount: ${gen.usageBackedCount || 0}`,
     `- emptyDataCount: ${gen.emptyDataCount || 0}`,
+    `- skippedEmptyCount: ${gen.skippedEmptyCount || 0}`,
+    `- prunedHandlers: ${gen.prunedHandlers || 0}`,
+    `- prunedContracts: ${gen.prunedContracts || 0}`,
     `- enumBackedCount: ${gen.enumBackedCount || 0}`,
     `- gatewayFilteredRoles: ${gen.gatewayFilteredRoles || 0}`,
     '',
     '## Coverage note',
     '',
-    '静态分析不保证零遗漏。`gapApis` 列出缺口；请跑 `session` 走主路径并用 `capture-merge` 回灌。',
+    '- **emptyData**：`success.data` 无字段（用法倒推未抽出 props）。',
+    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol`）；与 emptyData 常重叠但不是同一指标。',
+    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` / `no_property_access` / `no_callsite` → 只写 contract、不渲空 handler、不进 proxy-rules。',
+    '- **prunedHandlers / prunedContracts**：`--force` 时删除不在本轮白名单且无 `mock-skill:manual` 的孤儿产物。',
+    '- 噪音过滤：跳过 `e2e/`、`*.spec.*`、`src/mock/`；pathLiteral 需 request 上下文。',
+    '- 请跑 `session` 走主路径并用 `capture-merge` 回灌真实值。',
     '',
     '## Roles summary',
     '',
@@ -165,6 +173,9 @@ async function initProject(opts = {}) {
         discovered: apiList.length,
         usageBackedCount: gen.usageBackedCount,
         emptyDataCount: gen.emptyDataCount,
+        skippedEmptyCount: gen.skippedEmptyCount,
+        prunedHandlers: gen.prunedHandlers || 0,
+        prunedContracts: gen.prunedContracts || 0,
         enumBackedCount: gen.enumBackedCount,
         gapApis: gen.gapApis,
         removedGateway: gen.removedGateway,
@@ -186,7 +197,7 @@ async function initProject(opts = {}) {
     console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
   }
   console.log(
-    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} gaps=${(gen.gapApis || []).length}`,
+    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
   );
 
   return {
