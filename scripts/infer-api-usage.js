@@ -1121,19 +1121,27 @@ function dedupe(apis) {
       map.set(key, {
         ...a,
         host,
-        evidences: [a.evidence],
+        evidences: [a.evidence].filter(Boolean),
         exportHints: a.exportHint ? [a.exportHint] : [],
+        exportKeys: a.exportKey ? [a.exportKey] : [],
       });
     } else {
       const cur = map.get(key);
-      cur.evidences.push(a.evidence);
-      if (a.exportHint) cur.exportHints.push(a.exportHint);
+      if (a.evidence) cur.evidences.push(a.evidence);
+      if (a.exportHint && !cur.exportHints.includes(a.exportHint)) {
+        cur.exportHints.push(a.exportHint);
+      }
+      if (a.exportKey && !cur.exportKeys.includes(a.exportKey)) {
+        cur.exportKeys.push(a.exportKey);
+      }
       if (a.confidence === 'high') cur.confidence = 'high';
     }
   }
   let list = [...map.values()].map((a) => ({
     ...a,
+    // Prefer first hint for display; usage-io may rewrite to the callsite-rich one
     exportHint: a.exportHints?.[0] || null,
+    exportKey: a.exportKeys?.[0] || a.exportKey || null,
   }));
 
   // Drop _default twin when a real-host API already covers the same method+path

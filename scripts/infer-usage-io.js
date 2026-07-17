@@ -1210,11 +1210,34 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
       ];
       const prevGaps = new Set(api.coverage?.gaps || []);
       for (const g of gaps) prevGaps.add(g);
-      // Drop stale emptiness gaps if we now have paths
-      if (responsePaths.length || Object.keys(api.responseShape.props || {}).length) {
+      const mergedHasShape =
+        responsePaths.length > 0 ||
+        Object.keys(api.responseShape.props || {}).length > 0 ||
+        (api.responseShape.type === 'array' &&
+          Object.keys(api.responseShape.item?.props || {}).length > 0) ||
+        api.responseShape.type === 'array';
+      // Drop stale emptiness gaps if merged shape / this pass has signal
+      if (mergedHasShape) {
         prevGaps.delete('no_property_access');
-        prevGaps.delete('no_callsite');
         prevGaps.delete('TRACE_EMPTY');
+        // Keep no_callsite only when NO export for this API has a callsite yet
+        if (hasCall || api.coverage?.layer?.bind === 'ok') {
+          prevGaps.delete('no_callsite');
+        }
+      }
+      // Prefer export with callsite + shape over unused twin on same path
+      if (
+        hasCall &&
+        (responsePaths.length ||
+          hasObjProps ||
+          hasItemProps ||
+          isArrayPayload)
+      ) {
+        api.exportHint = exportName;
+        if (exportKey) api.exportKey = exportKey;
+      } else if (!api.exportHint) {
+        api.exportHint = exportName;
+        if (exportKey) api.exportKey = api.exportKey || exportKey;
       }
       api.coverage = {
         request: {
@@ -1236,7 +1259,10 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
             ]),
           ],
           confidence:
-            responsePaths.length || api.coverage?.response?.pathsFound?.length
+            responsePaths.length ||
+            api.coverage?.response?.pathsFound?.length ||
+            (api.responseShape.type === 'array' &&
+              Object.keys(api.responseShape.item?.props || {}).length > 0)
               ? 'high'
               : prevGaps.has('no_property_access')
                 ? 'low'

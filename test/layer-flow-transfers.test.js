@@ -51,3 +51,47 @@ test('drainTransfers: Assign + IterItem + MemberRead', () => {
   assert.equal(shape.props.items.type, 'array');
   assert.ok(shape.props.items.item.props.cityId);
 });
+
+test('drainTransfers: JsxPropLink Select fieldNames → root array item props', () => {
+  const shape = { type: 'object', props: {} };
+  const g = createBindingGraph(shape, []);
+  g.drainTransfers([
+    {
+      type: 'Assign',
+      alias: 'detectOptions',
+      binding: { kind: 'root' },
+      asArray: true,
+    },
+    {
+      type: 'JsxPropLink',
+      arrayPath: [],
+      dataIndexes: ['itemName', 'itemId'],
+    },
+  ]);
+  assert.equal(shape.type, 'array');
+  assert.ok(shape.item.props.itemName);
+  assert.ok(shape.item.props.itemId);
+});
+
+test('bindItemAlias under nested itemList → nested item props', () => {
+  const shape = { type: 'object', props: {} };
+  const g = createBindingGraph(shape, []);
+  g.drainTransfers([
+    {
+      type: 'Assign',
+      alias: 'originData',
+      binding: { kind: 'root' },
+      asArray: true,
+    },
+  ]);
+  g.bindItemAlias('detail', []);
+  g.applyMember('detail', ['dirDesc']);
+  g.bindItemAlias('item', [], ['itemList']);
+  g.applyMember('item', ['itemName']);
+  g.applyMember('item', ['itemId']);
+  assert.equal(shape.type, 'array');
+  assert.ok(shape.item.props.dirDesc);
+  assert.equal(shape.item.props.itemList.type, 'array');
+  assert.ok(shape.item.props.itemList.item.props.itemName);
+  assert.ok(shape.item.props.itemList.item.props.itemId);
+});
