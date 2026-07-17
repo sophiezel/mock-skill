@@ -22,6 +22,14 @@
   ],
   "denyPathSubstrings": [],
   "pathAliases": {},
+  "callShapes": ["member", "direct", "config"],
+  "importSources": [
+    "@umijs/max",
+    "umi",
+    "@umijs/request",
+    "axios",
+    "umi-request"
+  ],
   "httpWrappers": [
     {
       "callee": "$HTTP",

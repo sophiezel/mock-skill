@@ -51,11 +51,23 @@ cd /path/to/frontend-app
 mock-skill init
 mock-skill init --task=TR-1234 --related-from=./docs/req.md
 mock-skill init --adapter=create-request   # 可选：叠加 adapters/<name>.js
+mock-skill init --strict-usage             # TRACE_EMPTY > 0 时非零退出
 ```
 
-默认扫描 `fetch` / `axios` / `$HTTP` 等注册表封装 / 字符串 URL；`createRequest` 亦内置。项目差异写 `<project>/.mock-skill/infer.json`（`httpWrappers` / `pathAliases`），或用 `--adapter=` 叠加 `adapters/`。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
+默认扫描 HTTP CallShape（`request(url,{method})` / `axios.get` / `$HTTP` 等）+ 用法倒推响应字段；`createRequest` 亦内置。项目差异写 `<project>/.mock-skill/infer.json`（`callShapes` / `importSources` / `httpWrappers` / `pathAliases`），或用 `--adapter=` 叠加 `adapters/`。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
 
-**样例数据（静态优先）**：init 根据用法倒推出的**接口字段**生成占位值（faker）；**不发明字段**。成功主看 `usageBackedCount`。`capture-merge` 功能完整保留，用于补静态缺口与真实值回灌（非 init 前置条件）。噪音路径会被过滤；`no_export_symbol` 且空 shape 不渲空 handler（`skippedEmpty`）。
+**样例数据（静态优先）**：
+
+- init 从用法倒推 **接口字段**（`exportKey=file#name` 身份绑定，同名跨模块不串台），经 JSON Schema + `json-schema-faker` 填占位值；**不发明字段**。
+- 成功主看 `usageBackedCount` / `usageBackedHints`；有调用点但 shape 空记 `TRACE_EMPTY`（`--strict-usage` 可硬失败）。
+- **`capture-merge`：显式真值写入**（以捕获数据为准，`response.source=usage+capture`）。**不是**补洞/自动兜底。
+- **覆盖矩阵**：普通 `init`/`generate`（含裸 `--force`）**保留**已有 capture；仅 `--overwrite-capture` 允许 usage 盖掉真值。
+- `no_export_symbol` 且空 shape → `skippedEmpty`（不渲空 handler）。
+
+```bash
+mock-skill capture-merge --name=<slug>           # 以真实捕获为准
+mock-skill generate --force --overwrite-capture  # 显式允许 usage 覆盖 capture
+```
 
 数据落在（扁平，一项目一份）：
 
@@ -126,17 +138,25 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 
 | 命令 | 作用 |
 |------|------|
-| `mock-skill init [--adapter=]` | 全量扫描并预生成 mock |
+| `mock-skill init [--adapter=] [--force] [--overwrite-capture] [--strict-usage]` | 全量扫描并预生成 mock |
 | `mock-skill import-openapi --from=` | 从 OpenAPI JSON 生成 contracts/handlers |
 | `mock-skill export-msw` | 导出 MSW handlers 供单测 |
 | `mock-skill classify` | 分类 |
-| `mock-skill generate` | 按分类结果生成 |
+| `mock-skill generate [--force] [--overwrite-capture]` | 按分类结果生成（默认可保 capture） |
 | `mock-skill session start\|stop` | 起停 mock±proxy（`--proxy-host` / `--scenario`） |
 | `mock-skill set-case` | 单接口切换用例 |
 | `mock-skill set-scenario` | 批量切换场景 |
 | `mock-skill smoke [--ci] [--scenario=]` | 冒烟（CI 非零退出；默认跳过 timeout/offline） |
 | `mock-skill audit --task=` | 追因 |
-| `mock-skill capture-merge` | 回灌运行时字段 |
+| `mock-skill capture-merge` | 以真实捕获覆盖对应接口 success 数据 |
+
+**init / generate 常用 flags：**
+
+| flag | 含义 |
+|------|------|
+| `--force` | 无 merge 重生 + 可 prune 孤儿；**默认仍不擦** `usage+capture` |
+| `--overwrite-capture` | 允许 usage/jsf 盖掉已有 capture 真值 |
+| `--strict-usage` | （仅 init）存在 `TRACE_EMPTY` 时非零退出 |
 
 ## 文档
 

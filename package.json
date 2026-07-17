@@ -21,6 +21,7 @@
     "@faker-js/faker": "^9.9.0",
     "@vue/compiler-dom": "^3.5.40",
     "express": "^4.21.2",
+    "json-schema-faker": "^0.5.8",
     "ts-morph": "^24.0.0"
   },
   "devDependencies": {

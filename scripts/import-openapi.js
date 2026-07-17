@@ -15,30 +15,10 @@ const {
 const { appendAudit } = require('../lib/audit');
 const { writeClassifyResult } = require('./classify-requests');
 const { generateMocks } = require('./generate-mock');
+const { jsonSchemaToShape } = require('../lib/infer/shape-json-schema');
 
 function schemaToShape(schema, components = {}) {
-  if (!schema || typeof schema !== 'object') {
-    return { type: 'object', props: {} };
-  }
-  if (schema.$ref) {
-    const name = String(schema.$ref).split('/').pop();
-    const resolved =
-      components.schemas?.[name] ||
-      components[name];
-    return schemaToShape(resolved, components);
-  }
-  if (schema.type === 'array') {
-    return { type: 'array', item: schemaToShape(schema.items, components) };
-  }
-  if (schema.type === 'object' || schema.properties) {
-    const props = {};
-    for (const [k, v] of Object.entries(schema.properties || {})) {
-      props[k] = schemaToShape(v, components);
-    }
-    return { type: 'object', props };
-  }
-  const t = schema.type || 'string';
-  return { type: t === 'integer' ? 'number' : t };
+  return jsonSchemaToShape(schema, components);
 }
 
 function extractHost(spec) {

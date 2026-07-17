@@ -4,33 +4,41 @@
 
 1. **静态优先**：init 尽量发现接口，并从用法倒推响应字段，使多数常规项目不抓包也能自测主路径。  
 2. **可扩展**：项目差异进 `<projectDir>/.mock-skill/infer.json`（合并 [`config/default.infer.json`](../config/default.infer.json)），不在引擎里为单仓写死。  
-3. **capture-merge = 补洞与增强**（**现有功能完整保留**）：缺键、真实样例值、静态抽不出时使用——不是 init 前置条件，也不削弱既有合并语义。  
-4. **禁止臆造字段**：键只来自用法倒推或 capture-merge / OpenAPI；faker 只填值不增键。
+3. **capture-merge = 显式真值写入**：执行该命令时以捕获的真实响应为准（`response.source=usage+capture`）。**不是**补洞/自动兜底。普通 `init`/`generate` **保留**已有 capture；仅 `--overwrite-capture` 允许 usage/jsf 盖掉。裸 `--force` 不擦 capture。  
+4. **禁止臆造字段**：键只来自用法倒推或 capture-merge / OpenAPI；materialize（json-schema-faker）只填值不增键。
 
 ## 默认扫描（无 adapter）
 
-1. **infer profile**：`config/default.infer.json` ← `.mock-skill/infer.json`（pathAliases / httpWrappers / deny）  
+1. **infer profile**：`config/default.infer.json` ← `.mock-skill/infer.json`（pathAliases / httpWrappers / callShapes / importSources / deny）  
 2. **serviceBase**：`config/env` 中 `KEY: 'https://host/prefix'` 记为网关，pathname 深度 ≤1 不生成 mock  
 3. **host 变量**：`src` 内 `apiPrefix = '//host'` 等赋值（含 IIFE 多环境）全部收集；模板 path 按变量 **全环境展开**  
-4. **HTTP 封装注册表**：默认 `$HTTP` / `http` / `request` / `api` / `apiClient` 等；项目 `httpWrappers` 可追加  
-5. **fetch** / **axios** / **createRequest**（内置）  
-6. **字符串 URL / path literal**：绝对 URL 与多段 path（导航 URL 不收录：`location.href` / `createWebView` 等）  
-7. **deny 列表**：CDN/静态资源 host（profile 可追加）  
-8. **usage-io** — 静态倒推响应字段（主路径），分层如下：
+4. **HTTP CallShape AST（主路径，ts-morph）**：统一识别三种调用形态（非品牌点对点）  
+   - `member`：`callee.verb(url)`（`$HTTP.get` / `axios.post` / `request.get`）  
+   - `direct`：`callee(url, { method })`（Umi `request('/path', { method:'GET' })` 及 import 别名）  
+   - `config`：`callee({ url|uri|path, method|type })`  
+   - Callee 判定：`httpWrappers[].callee` **或** import 来自 `importSources`（默认 `@umijs/max` / `umi` / `axios` 等）  
+   - 相对 path：结构扫描 `{ prefixList, originConfig }` → 最长 prefix 匹配后拼 `origin.pathname + path`（不绑 `ORIGIN_LIST` 符号名）  
+   - Call 落在 `export function/const` 内 → 绑定 `exportHint`  
+5. **HTTP 封装正则（兜底）**：`httpWrappers` 点方法字符串扫描（无 ts-morph 场景）  
+6. **fetch** / **createRequest**（内置）  
+7. **字符串 URL / path literal**：绝对 URL 与多段 path（导航 URL 不收录）  
+8. **deny 列表**：CDN/静态资源 host（profile 可追加）  
+9. **usage-io** — 静态倒推响应字段（主路径），分层如下：
    - **L1 Script AST**（`ts-morph`）：`.ts/.tsx/.js/.jsx` 与 `.vue` 的 `<script>` 虚拟文件  
    - **L2 Markup AST**（`@vue/compiler-dom`）：`.vue` 的 `<template>`（`v-for` / 插值 / 绑定中的成员访问）  
-   - **L3 BindingGraph**：响应路径 → 别名 → 数组性（由 `forEach`/`|| []`/`v-for` 等用法推断，**无字段名白名单**）→ `item.props`  
+   - **L3 BindingGraph**：固定 transfer（`Assign` / `MemberRead` / `IterItem` / `ObjLiteralProp` / `JsxPropLink`）+ worklist；React/Vue 只做 event 提取  
+   - **身份绑定**：`exportKey = definingFile#exportName`；同名跨模块不串台；import 回退必须带 moduleHints，否则 `bind_ambiguous`  
    - 路径别名：tsconfig/jsconfig `paths`；无配置且有 `src/` 时默认 `@/*`、`~/*` → `src/*`  
-   - **调用点双通道**：`findReferences` + **import-name 回退**  
    - 解构 / 短路 / 可选链 / `export { name }` 绑定 `exportHint`  
-9. **materialize** → contract cases（faker 只填已有键；嵌套 array + item.props → `[{…}]`）  
-10. **capture-merge**（可选增强）回灌真实响应  
+10. **materialize**：`responseShape` → JSON Schema → **json-schema-faker**（只填已有键）  
+11. **capture-merge**：显式命令覆盖为真实响应（见产品原则 §3）  
 
 ### 字段硬约束
 
 - **禁止创造响应字段**：`success.data` 的键只能来自接口用法或 `capture-merge` 真实 body。  
 - **禁止**把 UI state 改名（如 `setData({ cityId })`）扫进 shape。  
-- init 样例值仅为占位；需要真实值时再 `session` + `capture-merge`（功能与语义不变）。
+- init 样例值仅为占位；需要真实值时再 `session` + `capture-merge`。  
+- 有调用点但 shape 空 → gap `TRACE_EMPTY`；`--strict-usage` 时 init 失败。
 
 ### emptyData vs gaps
 
@@ -66,6 +74,8 @@
 ```json
 {
   "pathAliases": { "@/*": ["src/*"] },
+  "callShapes": ["member", "direct", "config"],
+  "importSources": ["@umijs/max", "umi", "axios"],
   "httpWrappers": [
     {
       "callee": "$API",
@@ -76,6 +86,10 @@
 ```
 
 路径：`<projectDir>/.mock-skill/infer.json`。
+
+- `callShapes`：启用的 AST 调用形态（默认三种全开）
+- `importSources`：这些模块的 import 绑定视为 HTTP 客户端（本地名任意，含 `import { request as http }`）
+- 相对 path 的 host 拼装来自结构型 `{ prefixList, originConfig }` 扫描，**不**依赖符号名
 
 ## 可选 adapter
 
@@ -91,6 +105,7 @@ mock-skill init --adapter=create-request
 contract.`coverage.gaps` 常见值：
 
 - `no_callsite` / `no_property_access` / `no_export_symbol`
+- `TRACE_EMPTY`（有调用点但 shape 空）/ `bind_ambiguous`（同名无模块锚点）
 - `dynamic_key` / `props_shallow_only` / `ref_lookup_failed`
 
-有 gap 时不得宣称 IO 完备。优先检查用法是否下钻字段；仍缺键时用完整 `capture-merge` 补洞（不阉割）。
+有 gap 时不得宣称 IO 完备。需要真实响应时执行 `capture-merge`（以 capture 为准）；普通 init 不会覆盖已有 capture。

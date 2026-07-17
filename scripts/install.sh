@@ -14,6 +14,10 @@ fi
 
 npm install
 
+# Sanity: materialize path depends on json-schema-faker
+node -e "require('json-schema-faker'); require('./lib/infer/shape-json-schema'); require('./lib/materialize');" \
+  || { echo "[mock-skill] dependency check failed"; exit 1; }
+
 echo "[mock-skill] npm link..."
 npm link
 
@@ -26,5 +30,12 @@ echo ""
 echo "[mock-skill] done. Try:"
 echo "  mock-skill --help"
 echo "  cd <your-frontend-project> && mock-skill init"
+echo "  mock-skill init --strict-usage          # TRACE_EMPTY → non-zero exit"
+echo "  mock-skill capture-merge --name=<slug>  # real capture wins (not auto fill-gap)"
+echo "  mock-skill generate --overwrite-capture # only then may usage overwrite capture"
 echo ""
-command -v mock-skill >/dev/null && mock-skill --help | head -n 20 || echo "  (mock-skill not on PATH yet — use: node $ROOT/bin/mock-skill.js)"
+if command -v mock-skill >/dev/null; then
+  mock-skill --help | head -n 24
+else
+  echo "  (mock-skill not on PATH yet — use: node $ROOT/bin/mock-skill.js)"
+fi

@@ -48,7 +48,8 @@ disable-model-invocation: true
 - [ ] CORS 默认 localhost；Hybrid 非 localhost Origin → `cors.extraOrigins`
 - [ ] soft miss：透传 + capture，不因单接口拖垮 session
 - [ ] **E2E 前显式 `set-scenario`**；勿只生成 success 就宣称可测异常路径
-- [ ] `coverage.gaps` 非空时**不宣称 IO 完备**；session + `capture-merge` 补洞
+- [ ] `coverage.gaps` 非空时**不宣称 IO 完备**（含 `TRACE_EMPTY`）；需要真实值时显式 `capture-merge`（以 capture 为准，非补洞）
+- [ ] 普通 `init`/`generate --force` **不得**静默覆盖 `usage+capture`；覆盖须 `--overwrite-capture`
 - [ ] **禁止创造响应字段**：键只来自用法或 capture；faker 只填值不增键
 
 ## 场景决策树

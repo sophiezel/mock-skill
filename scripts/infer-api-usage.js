@@ -1224,6 +1224,27 @@ function inferApiUsage(projectDir, opts = {}) {
   const all = [];
   let gatewayFilteredCount = 0;
 
+  // AST CallShape discover (primary for direct/config; also covers member)
+  try {
+    const { discoverPrefixOriginMaps } = require('../lib/infer/prefix-origin-map');
+    const { extractHttpCallShapeApis } = require('../lib/infer/http-call-shapes');
+    const prefixMaps = discoverPrefixOriginMaps(projectDir, files);
+    const shapeApis = extractHttpCallShapeApis({
+      projectDir,
+      files,
+      hostVars,
+      serviceBases,
+      wrappers,
+      callShapes: inferCfg.callShapes,
+      importSources: inferCfg.importSources,
+      prefixMaps,
+      isGatewayOnlyPath,
+    });
+    all.push(...shapeApis);
+  } catch (err) {
+    console.warn(`[mock-skill] call-shapes discover skipped: ${err.message}`);
+  }
+
   // Count filtered gateway URLs for report
   for (const file of files) {
     let content;

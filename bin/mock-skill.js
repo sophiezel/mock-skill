@@ -36,9 +36,9 @@ function help() {
 mock-skill — generic zero-coupling frontend API mock (self-test + E2E)
 
 Usage:
-  mock-skill init [projectDir] [--name=slug] [--task=ID] [--related-from=path] [--adapter=name] [--force]
+  mock-skill init [projectDir] [--name=slug] [--task=ID] [--related-from=path] [--adapter=name] [--force] [--overwrite-capture] [--strict-usage]
   mock-skill classify [--task=ID] [--related-from=path]
-  mock-skill generate [--task=ID] [--force]
+  mock-skill generate [--task=ID] [--force] [--overwrite-capture]
   mock-skill session start|stop [--name=slug] [--task=ID] [--mock-port=N] [--proxy-port=N] [--proxy-host=HOST] [--proxy=0|1] [--start-url=URL] [--no-auto-launch] [--scenario=NAME]
   mock-skill set-case <apiId> <caseId> [--task=ID]
   mock-skill set-scenario <name> [--name=slug]
@@ -99,6 +99,8 @@ async function main() {
       relatedFrom: f['related-from'] || null,
       adapter: f.adapter || null,
       force: Boolean(f.force),
+      overwriteCapture: Boolean(f['overwrite-capture']),
+      strictUsage: Boolean(f['strict-usage']),
       writeProjectConfig: Boolean(f['write-project-config']),
     });
     return;
@@ -154,6 +156,7 @@ async function main() {
       taskId: f.task || classified.taskId || null,
       force: Boolean(f.force),
       merge: !f.force,
+      overwriteCapture: Boolean(f['overwrite-capture']),
     });
     console.log(`[mock-skill] generate`, gen);
     return;

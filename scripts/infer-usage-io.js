@@ -305,15 +305,97 @@ function walkVue(dir, out = []) {
 }
 
 /**
+ * Evidence file paths from an API (strip :line).
+ * @param {object} api
+ * @returns {string[]}
+ */
+function evidenceRelPaths(api) {
+  const raw = [...(api.evidences || []), api.evidence].filter(Boolean);
+  return raw.map((e) =>
+    String(e)
+      .split(':')[0]
+      .replace(/\\/g, '/'),
+  );
+}
+
+/**
+ * Absolute decl file → project-relative posix path.
+ * @param {object} decl
+ * @param {string} projectDir
+ */
+function declRelPath(decl, projectDir) {
+  try {
+    const abs = decl.getSourceFile().getFilePath().replace(/\\/g, '/');
+    return path.relative(projectDir, abs).replace(/\\/g, '/');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Whether API evidence points at this declaration's defining module.
+ * Prevents same-named exports in different services from sharing usage-io.
+ * @param {object} api
+ * @param {object} decl
+ * @param {string} projectDir
+ */
+function apiBelongsToDecl(api, decl, projectDir) {
+  const declRel = declRelPath(decl, projectDir);
+  if (!declRel) return false;
+  const declBase = path.posix.basename(declRel);
+  const declDir = path.posix.dirname(declRel);
+  for (const e of evidenceRelPaths(api)) {
+    const eNorm = e.replace(/^\.\//, '');
+    if (eNorm === declRel || eNorm.endsWith('/' + declRel) || declRel.endsWith(eNorm)) {
+      return true;
+    }
+    // evidence may be `src/services/foo/index.tsx` vs decl same
+    if (declDir !== '.' && (eNorm.includes(declDir) || declRel.includes(eNorm.replace(/\/[^/]+$/, '')))) {
+      if (eNorm.endsWith(declBase) || eNorm.includes(declDir + '/')) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Module path fragments for scoping import-name fallback (e.g. rejectReason).
+ * @param {object} decl
+ * @param {string} projectDir
+ * @returns {string[]}
+ */
+function declModuleHints(decl, projectDir) {
+  const rel = declRelPath(decl, projectDir);
+  if (!rel) return [];
+  const noExt = rel.replace(/\.[^.]+$/, '');
+  const parts = noExt.split('/').filter(Boolean);
+  const hints = [];
+  if (parts.length >= 2) hints.push(parts.slice(-2).join('/'));
+  if (parts.length >= 1) {
+    const folder = parts[parts.length - 1] === 'index' ? parts[parts.length - 2] : parts[parts.length - 1];
+    if (folder) hints.push(folder);
+  }
+  return [...new Set(hints.filter(Boolean))];
+}
+
+/**
  * Collect local binding names for `exportName` from import { ... } in a source file.
  * @param {object} sf - ts-morph SourceFile
  * @param {string} exportName
+ * @param {string[]} [moduleHints] - if set, only imports whose specifier contains a hint
  * @returns {Set<string>}
  */
-function collectImportLocalNames(sf, exportName) {
+function collectImportLocalNames(sf, exportName, moduleHints) {
   const locals = new Set();
+  const hints = moduleHints?.length ? moduleHints : null;
+  function specOk(spec) {
+    if (!hints) return true;
+    const s = String(spec || '');
+    return hints.some((h) => s.includes(h));
+  }
   try {
     for (const imp of sf.getImportDeclarations()) {
+      const spec = imp.getModuleSpecifierValue?.() || '';
+      if (!specOk(spec)) continue;
       for (const n of imp.getNamedImports()) {
         if (n.getName() === exportName) {
           locals.add(n.getAliasNode()?.getText() || n.getName());
@@ -326,9 +408,10 @@ function collectImportLocalNames(sf, exportName) {
   // Text fallback when ts-morph named imports fail on odd syntax
   if (locals.size === 0) {
     const text = sf.getFullText();
-    const re = /import\s*\{([^}]+)\}\s*from\s*['"`][^'"`]+['"`]/g;
+    const re = /import\s*\{([^}]+)\}\s*from\s*['"`]([^'"`]+)['"`]/g;
     let m;
     while ((m = re.exec(text))) {
+      if (!specOk(m[2])) continue;
       const specs = m[1].split(',').map((s) => s.trim()).filter(Boolean);
       for (const spec of specs) {
         const parts = spec.split(/\s+as\s+/);
@@ -344,15 +427,56 @@ function collectImportLocalNames(sf, exportName) {
 }
 
 /**
- * Find CallExpressions for exportName via import-name matching (no module resolution).
+ * Deep-merge response shapes (union props / item props; prefer array over unknown).
+ * @param {object} into
+ * @param {object} from
+ */
+function mergeResponseShapes(into, from) {
+  if (!from) return into;
+  if (!into) return JSON.parse(JSON.stringify(from));
+  if (from.type === 'array' && into.type !== 'array') {
+    into.type = 'array';
+    into.item = into.item || { type: 'object', props: {} };
+  }
+  if (from.item) {
+    if (!into.item) into.item = { type: 'object', props: {} };
+    mergeResponseShapes(into.item, from.item);
+  }
+  if (from.props) {
+    if (!into.props) into.props = {};
+    for (const [k, v] of Object.entries(from.props)) {
+      if (!into.props[k]) {
+        into.props[k] = JSON.parse(JSON.stringify(v));
+      } else {
+        mergeResponseShapes(into.props[k], v);
+      }
+    }
+  }
+  if (from.enums?.length) {
+    if (!into.enums) into.enums = [];
+    for (const e of from.enums) {
+      if (!into.enums.some((x) => x === e || (x && e && x.value === e.value))) {
+        into.enums.push(e);
+      }
+    }
+  }
+  if (into.type === 'unknown' && from.type && from.type !== 'unknown') {
+    into.type = from.type;
+  }
+  return into;
+}
+
+/**
+ * Find CallExpressions for exportName via import-name matching.
+ * @param {string[]} [moduleHints] - scope imports to the defining service module
  * @returns {Array<{ call: object, sf: object, ref: object }>}
  */
-function findImportNameCallExpressions(sourceFiles, exportName, SyntaxKind) {
+function findImportNameCallExpressions(sourceFiles, exportName, SyntaxKind, moduleHints) {
   const out = [];
   for (const sf of sourceFiles) {
     const text = sf.getFullText();
     if (!text.includes(exportName)) continue;
-    const locals = collectImportLocalNames(sf, exportName);
+    const locals = collectImportLocalNames(sf, exportName, moduleHints);
     /** @type {Set<string>} namespace / default import local names */
     const namespaces = new Set();
     try {
@@ -587,20 +711,25 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
     return fp.includes(`${path.sep}src${path.sep}`);
   });
 
-  // Build declaration map: export name → Node
-  const exportDecls = new Map();
+  // Build declaration map: export name → all defining Nodes (same name in different modules)
+  /** @type {Map<string, object[]>} */
+  const exportDeclsByName = new Map();
   for (const sf of sourceFiles) {
-    for (const decl of sf.getExportedDeclarations()) {
-      const [name, decls] = decl;
+    for (const entry of sf.getExportedDeclarations()) {
+      const [name, decls] = entry;
       if (!exportToApis.has(name)) continue;
-      if (decls[0]) exportDecls.set(name, decls[0]);
+      if (!exportDeclsByName.has(name)) exportDeclsByName.set(name, []);
+      const bucket = exportDeclsByName.get(name);
+      for (const d of decls) {
+        if (d && !bucket.includes(d)) bucket.push(d);
+      }
     }
   }
 
   // Fallback: exportHint may be a local binding used in `export default { name }`
   // without a named export — resolve VariableDeclaration / FunctionDeclaration by name.
   for (const name of exportToApis.keys()) {
-    if (exportDecls.has(name)) continue;
+    if (exportDeclsByName.has(name) && exportDeclsByName.get(name).length) continue;
     for (const sf of sourceFiles) {
       let found = null;
       for (const vd of sf.getVariableDeclarations()) {
@@ -618,15 +747,30 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
         }
       }
       if (found) {
-        exportDecls.set(name, found);
+        if (!exportDeclsByName.has(name)) exportDeclsByName.set(name, []);
+        exportDeclsByName.get(name).push(found);
         break;
       }
     }
   }
 
+  /** @type {Array<[string, object]>} */
+  const exportDeclPairs = [];
+  for (const [name, decls] of exportDeclsByName) {
+    for (const d of decls) exportDeclPairs.push([name, d]);
+  }
+
   let processed = 0;
-  for (const [exportName, decl] of exportDecls) {
-    const relatedApis = exportToApis.get(exportName) || [];
+  for (const [exportName, decl] of exportDeclPairs) {
+    const allNamedApis = exportToApis.get(exportName) || [];
+    const declsForName = exportDeclsByName.get(exportName) || [];
+    let relatedApis = allNamedApis.filter((api) =>
+      apiBelongsToDecl(api, decl, projectDir),
+    );
+    // Sole declaration for this name owns all APIs with that exportHint
+    if (!relatedApis.length && declsForName.length === 1) {
+      relatedApis = allNamedApis;
+    }
     if (!relatedApis.length) continue;
 
     const shape = emptyShape();
@@ -791,15 +935,29 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
       }
     }
 
+    const moduleHints = declModuleHints(decl, projectDir);
+    const exportKey = (() => {
+      const { makeExportKey } = require('../lib/infer/shape-json-schema');
+      return makeExportKey(declRelPath(decl, projectDir), exportName);
+    })();
+    for (const api of relatedApis) {
+      if (exportKey) api.exportKey = api.exportKey || exportKey;
+    }
+
     // Import-name fallback when @/ ~/ aliases break findReferences
     if (!hasCall) {
-      const fallback = findImportNameCallExpressions(
-        sourceFiles,
-        exportName,
-        SyntaxKind,
-      );
-      for (const { call, sf } of fallback) {
-        processCallExpression(call, sf);
+      if (!moduleHints.length) {
+        gaps.add('bind_ambiguous');
+      } else {
+        const fallback = findImportNameCallExpressions(
+          sourceFiles,
+          exportName,
+          SyntaxKind,
+          moduleHints,
+        );
+        for (const { call, sf } of fallback) {
+          processCallExpression(call, sf);
+        }
       }
     }
 
@@ -811,7 +969,9 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
     }
     if (hasCall) {
       for (const sf of sourceFiles) {
-        if (collectImportLocalNames(sf, exportName).size) importFiles.add(sf);
+        if (collectImportLocalNames(sf, exportName, moduleHints).size) {
+          importFiles.add(sf);
+        }
       }
     }
 
@@ -1011,45 +1171,89 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
     } else {
       gaps.delete('no_property_access');
     }
+    // Layer gate: callsite exists but shape empty → TRACE_EMPTY
+    if (
+      hasCall &&
+      !hasObjProps &&
+      !hasItemProps &&
+      !isArrayPayload &&
+      !responsePaths.length
+    ) {
+      gaps.add('TRACE_EMPTY');
+    }
 
-    // Merge into related APIs
-    const coverage = {
-      request: {
-        keysFound: [...queryKeys, ...bodyKeys],
-        dynamicKeyRisk,
-        confidence:
-          queryKeys.size || bodyKeys.size
-            ? 'high'
-            : gaps.has('no_callsite')
-              ? 'low'
-              : 'medium',
-      },
-      response: {
-        pathsFound: [...new Set(responsePaths)],
-        confidence: responsePaths.length
-          ? 'high'
-          : gaps.has('no_property_access')
-            ? 'low'
-            : 'medium',
-      },
-      enums: mergeEnumEntries(enums),
-      gaps: [...gaps],
+    const layer = {
+      discover: 'ok',
+      bind: gaps.has('bind_ambiguous')
+        ? 'ambiguous'
+        : gaps.has('no_callsite')
+          ? 'no_callsite'
+          : 'ok',
+      trace: gaps.has('TRACE_EMPTY') || gaps.has('no_property_access')
+        ? 'empty'
+        : 'ok',
+      materialize: 'pending',
     };
 
+    // Merge into related APIs (union when multiple decls enrich same API)
     for (const api of relatedApis) {
-      api.queryHints = [...queryKeys];
-      api.bodyHints = [...bodyKeys];
-      api.responseShape = shape;
+      api.queryHints = [
+        ...new Set([...(api.queryHints || []), ...queryKeys]),
+      ];
+      api.bodyHints = [...new Set([...(api.bodyHints || []), ...bodyKeys])];
+      api.responseShape = mergeResponseShapes(api.responseShape || emptyShape(), shape);
       api.responseHints = [
-        ...Object.keys(shape.props || {}),
-        ...(shape.type === 'array'
-          ? Object.keys(shape.item?.props || {}).map((k) => `[].${k}`)
+        ...Object.keys(api.responseShape.props || {}),
+        ...(api.responseShape.type === 'array'
+          ? Object.keys(api.responseShape.item?.props || {}).map((k) => `[].${k}`)
           : []),
       ];
-      api.coverage = coverage;
+      const prevGaps = new Set(api.coverage?.gaps || []);
+      for (const g of gaps) prevGaps.add(g);
+      // Drop stale emptiness gaps if we now have paths
+      if (responsePaths.length || Object.keys(api.responseShape.props || {}).length) {
+        prevGaps.delete('no_property_access');
+        prevGaps.delete('no_callsite');
+        prevGaps.delete('TRACE_EMPTY');
+      }
+      api.coverage = {
+        request: {
+          keysFound: [...new Set([...(api.coverage?.request?.keysFound || []), ...queryKeys, ...bodyKeys])],
+          dynamicKeyRisk:
+            Boolean(api.coverage?.request?.dynamicKeyRisk) || dynamicKeyRisk,
+          confidence:
+            queryKeys.size || bodyKeys.size || api.coverage?.request?.keysFound?.length
+              ? 'high'
+              : prevGaps.has('no_callsite')
+                ? 'low'
+                : 'medium',
+        },
+        response: {
+          pathsFound: [
+            ...new Set([
+              ...(api.coverage?.response?.pathsFound || []),
+              ...responsePaths,
+            ]),
+          ],
+          confidence:
+            responsePaths.length || api.coverage?.response?.pathsFound?.length
+              ? 'high'
+              : prevGaps.has('no_property_access')
+                ? 'low'
+                : 'medium',
+        },
+        enums: mergeEnumEntries([
+          ...(api.coverage?.enums || []),
+          ...enums,
+        ]),
+        gaps: [...prevGaps],
+        layer: api.coverage?.layer && api.coverage.layer.trace === 'ok'
+          ? api.coverage.layer
+          : layer,
+      };
       api.confidence =
-        coverage.response.confidence === 'high' ||
-        coverage.request.confidence === 'high'
+        api.coverage.response.confidence === 'high' ||
+        api.coverage.request.confidence === 'high'
           ? 'high'
           : api.confidence;
     }
@@ -1070,7 +1274,7 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
   }
 
   console.log(
-    `[mock-skill] usage-io enriched ${processed}/${exportDecls.size} exports (${apis.length} apis)`,
+    `[mock-skill] usage-io enriched ${processed}/${exportDeclPairs.length} exports (${apis.length} apis)`,
   );
   return apis;
 }

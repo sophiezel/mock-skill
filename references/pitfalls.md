@@ -7,8 +7,9 @@
 5. **端口占用** — start 前探测，失败即报错
 6. **误提交 .data** — 已 gitignore
 7. **env 基址 ≠ 接口** — `KEY: 'https://host/prefix'` 是网关前缀，不会再生成根 mock；完整 path=`prefix+/external/...`
-8. **空 data** — 无调用点属性访问时可能仍空；看 `coverage.gaps`，跑 session + `capture-merge`
+8. **空 data** — 看 `coverage.gaps`（`TRACE_EMPTY` / `no_callsite` / `no_property_access`）；需要真实值时显式跑 `capture-merge`（以 capture 为准，不是补洞）
 8b. **字段双写（cityId/city_id）** — UI state 与接口字段同名冲突时只保留接口侧键；勿把 `setData({ cityId })` 扫进 shape；faker 不增键
+8c. **init 盖掉 capture** — 普通 init 应保留 `usage+capture`；若要 usage 覆盖真值须显式 `--overwrite-capture`
 9. **静态非完备** — `gapApis` 非空时勿宣称 IO 完备
 10. **真机打不到代理** — 默认 `proxy.host=127.0.0.1`，真机须 `--proxy-host=0.0.0.0` 且电脑手机同局域网；勿在公共 Wi‑Fi 开 0.0.0.0
 11. **E2E scenario 串台** — 并行 worker 共用 session 会互相覆盖 case；一 worker 一 session 或 `beforeEach`/`afterEach` 复位

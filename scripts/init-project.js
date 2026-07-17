@@ -21,6 +21,8 @@ async function initProject(opts = {}) {
   const projectDir = path.resolve(opts.projectDir || process.cwd());
   const taskId = opts.taskId || null;
   const force = Boolean(opts.force);
+  const overwriteCapture = Boolean(opts.overwriteCapture);
+  const strictUsage = Boolean(opts.strictUsage);
   const relatedFrom = opts.relatedFrom || null;
   const nameOverride = opts.name || null;
 
@@ -81,6 +83,7 @@ async function initProject(opts = {}) {
       responseShape: a.responseShape,
       coverage: a.coverage,
       exportHint: a.exportHint,
+      exportKey: a.exportKey,
       confidence: a.confidence || r.confidence,
     };
   });
@@ -101,6 +104,7 @@ async function initProject(opts = {}) {
     taskId,
     force,
     merge: !force,
+    overwriteCapture,
   });
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -137,17 +141,22 @@ async function initProject(opts = {}) {
     `- prunedHandlers: ${gen.prunedHandlers || 0}`,
     `- prunedContracts: ${gen.prunedContracts || 0}`,
     `- enumBackedCount: ${gen.enumBackedCount || 0}`,
+    `- TRACE_EMPTY: ${gen.traceEmptyCount || 0}`,
+    `- bind_ambiguous: ${gen.bindAmbiguousCount || 0}`,
+    `- capturePreserved: ${gen.capturePreservedCount || 0}`,
     `- gatewayFilteredRoles: ${gen.gatewayFilteredRoles || 0}`,
     '',
     '## Coverage note',
     '',
     '- **emptyData**：`success.data` 无字段（静态用法倒推未抽出 props）。含多环境 host 副本，数字会被放大。',
     '- **usageBackedHints / emptyDataHints**：按 `exportHint` 去重后的接口函数数，更接近「有多少 service 导出没抽到字段」。',
-    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol` / `no_callsite`）；与 emptyData 常重叠但不是同一指标。',
-    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` → 只写 contract、不渲空 handler、不进 proxy-rules。已绑定 exportHint 的空 shape 仍会生成 `data:{}` handler。',
-    '- **prunedHandlers / prunedContracts**：`--force` 时删除不在本轮白名单且无 `mock-skill:manual` 的孤儿产物。',
+    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol` / `no_callsite` / `TRACE_EMPTY` / `bind_ambiguous`）。',
+    '- **TRACE_EMPTY**：有调用点但响应 shape 仍空——分层 trace 失败，不是「生成成功」。',
+    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` → 只写 contract、不渲空 handler、不进 proxy-rules。',
+    '- **prunedHandlers / prunedContracts**：`--force` 时删除不在本轮白名单且无 `mock-skill:manual` 的孤儿产物；**默认不擦除** `usage+capture` 真值。',
+    '- **capture-merge**：显式命令，写入真实响应并以 capture 数据为准（`response.source=usage+capture`）。不是补洞/自动兜底。',
+    '- **覆盖矩阵**：普通 `init`/`generate` 保留已有 capture；仅 `--overwrite-capture` 允许 usage/jsf 盖掉 capture；裸 `--force` 不擦 capture。',
     '- 噪音过滤：跳过 `e2e/`、`*.spec.*`、`src/mock/`；pathLiteral 需 request 上下文。',
-    '- **capture-merge**（功能完整保留）：用于补静态缺口、缺键并入、真实样例值覆盖占位——是增强环，不是 init 前置条件。有字段用法时应优先靠静态 usage-io 出非空 data。',
     '- 项目差异：`<project>/.mock-skill/infer.json` 可覆盖 pathAliases / httpWrappers（合并 `config/default.infer.json`）。',
     '',
     '## Roles summary',
@@ -184,6 +193,9 @@ async function initProject(opts = {}) {
         prunedHandlers: gen.prunedHandlers || 0,
         prunedContracts: gen.prunedContracts || 0,
         enumBackedCount: gen.enumBackedCount,
+        traceEmptyCount: gen.traceEmptyCount || 0,
+        bindAmbiguousCount: gen.bindAmbiguousCount || 0,
+        capturePreservedCount: gen.capturePreservedCount || 0,
         gapApis: gen.gapApis,
         removedGateway: gen.removedGateway,
       },
@@ -195,7 +207,7 @@ async function initProject(opts = {}) {
   appendAudit(projectSlug, {
     command: 'init',
     taskId,
-    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount} usageHints=${gen.usageBackedHints} emptyHints=${gen.emptyDataHints}`,
+    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0}`,
     reportPath,
   });
 
@@ -204,8 +216,16 @@ async function initProject(opts = {}) {
     console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
   }
   console.log(
-    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
+    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
   );
+
+  if (strictUsage && (gen.traceEmptyCount || 0) > 0) {
+    const err = new Error(
+      `strict-usage: TRACE_EMPTY=${gen.traceEmptyCount} (callsite with empty response shape)`,
+    );
+    err.code = 'STRICT_USAGE';
+    throw err;
+  }
 
   return {
     projectSlug,
