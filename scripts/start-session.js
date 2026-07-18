@@ -391,6 +391,15 @@ async function startSession(opts = {}) {
   }
 
   console.log('[mock-skill] session running — Ctrl+C to stop');
+  // SIGHUP (terminal close / background without --detach) must not kill the session.
+  // Use `mock-skill stop` or SIGTERM/SIGINT to shut down.
+  try {
+    process.on('SIGHUP', () => {
+      console.log('[mock-skill] ignoring SIGHUP (use mock-skill stop to end session)');
+    });
+  } catch {
+    /* platform may not support SIGHUP */
+  }
   const shutdown = async () => {
     console.log('\n[mock-skill] stopping...');
     if (chromePid) {

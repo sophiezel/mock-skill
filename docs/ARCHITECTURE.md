@@ -118,3 +118,5 @@ rules/                         共享 rule 包（可 git；不绑 project）
 - stubId 跨不同服务冲突 → 启动失败（不静默覆盖）。
 - `--task` 只做需求溯源，**不**拆分 mock 目录。
 - 单测默认写入临时 `MOCK_SKILL_DATA_ROOT`，不污染本仓 `.data`。
+- 读 contracts/handlers：**统一** `lib/catalog-merge`（`loadContractsForCatalog` / `handlerExistsForContract`）；禁止各脚本私自只扫 `projects/*/mocks`。
+- 后台 session：`mock-skill start --detach`（子进程保活）；前台默认忽略 SIGHUP，用 `stop` / SIGTERM 结束。

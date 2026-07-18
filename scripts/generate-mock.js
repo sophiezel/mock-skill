@@ -382,53 +382,18 @@ function mergeCasesPreserve(prev = [], next = []) {
 }
 
 function loadExistingContracts(projectSlug) {
+  const { loadContractsForCatalog } = require('../lib/catalog-merge');
   const map = new Map();
-  function loadDir(dir) {
-    if (!fs.existsSync(dir)) return;
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.json')) continue;
-      try {
-        const c = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-        if (c.id) map.set(c.id, c);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-  loadDir(path.join(projectDataDir(projectSlug), 'contracts'));
-  // Load only services referenced by this project's index (avoid cross-project pollution)
-  const { serviceDataDir: svcDir } = require('../lib/paths');
-  const { readProjectIndex } = require('../lib/catalog-merge');
-  const idx = readProjectIndex(projectSlug);
-  for (const up of idx?.upstreams || []) {
-    loadDir(path.join(svcDir(up), 'contracts'));
+  for (const c of loadContractsForCatalog(projectSlug)) {
+    if (c.id) map.set(c.id, c);
+    if (c.stubId && c.stubId !== c.id) map.set(c.stubId, c);
   }
   return map;
 }
 
 function listExistingMockKeys(projectSlug) {
-  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
-  const keys = new Set();
-  if (!fs.existsSync(mocksRoot)) return keys;
-
-  function walkDir(dir, host, parts) {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, ent.name);
-      if (ent.isDirectory()) {
-        walkDir(full, host, [...parts, ent.name]);
-      } else if (ent.name === 'index.js') {
-        const p = '/' + parts.join('/');
-        keys.add(`GET ${host}${p}`);
-        keys.add(`POST ${host}${p}`);
-      }
-    }
-  }
-
-  for (const hostEnt of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
-    if (!hostEnt.isDirectory()) continue;
-    walkDir(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
-  }
-  return keys;
+  const { listMockKeysForCatalog } = require('../lib/catalog-merge');
+  return listMockKeysForCatalog(projectSlug);
 }
 
 /** Remove gateway-only mocks (path depth <= 1) left by old infer */

@@ -12,6 +12,7 @@ const {
   projectDataDir,
   ensureProjectDirs,
 } = require('../lib/paths');
+const { loadContractsForCatalog } = require('../lib/catalog-merge');
 const { appendAudit } = require('../lib/audit');
 
 function contractToMswHandler(contract) {
@@ -47,16 +48,13 @@ function exportMsw(opts = {}) {
   const projectDir = opts.projectDir || process.cwd();
   const projectSlug = resolveProjectSlug(projectDir, opts.name);
   ensureProjectDirs(projectSlug);
-  const contractsDir = path.join(projectDataDir(projectSlug), 'contracts');
-  if (!fs.existsSync(contractsDir)) {
+  const contracts = loadContractsForCatalog(projectSlug);
+  if (!contracts.length) {
     throw new Error('no contracts — run mock-skill init or import-openapi first');
   }
 
   const handlers = [];
-  for (const f of fs.readdirSync(contractsDir).filter((x) => x.endsWith('.json'))) {
-    const contract = JSON.parse(
-      fs.readFileSync(path.join(contractsDir, f), 'utf8'),
-    );
+  for (const contract of contracts) {
     handlers.push(contractToMswHandler(contract));
   }
 

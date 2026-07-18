@@ -99,3 +99,9 @@ test('U6: stubId rejects FQDN as upstreamId (guard)', () => {
   assert.ok(!id.includes('://'));
   assert.ok(!id.includes(':443'));
 });
+
+test('resolveProjectSlug accepts --name array from CLI parseArgs', () => {
+  const { resolveProjectSlug } = require('../lib/paths');
+  assert.equal(resolveProjectSlug('/tmp/app', ['tower']), 'tower');
+  assert.equal(resolveProjectSlug('/tmp/app', 'tower'), 'tower');
+});

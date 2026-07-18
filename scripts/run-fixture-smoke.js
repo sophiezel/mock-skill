@@ -84,8 +84,10 @@ async function run() {
   );
 
   ensureProjectDirs(SLUG);
-  const mocksRoot = path.join(projectDataDir(SLUG), 'mocks');
-  if (!fs.existsSync(mocksRoot)) {
+  const { mocksRootFor, mergeCatalogs, loadContractsForCatalog, handlerExistsForContract } = require('../lib/catalog-merge');
+  const contracts = loadContractsForCatalog(SLUG);
+  const hasHandler = contracts.some((c) => handlerExistsForContract(c, SLUG));
+  if (!hasHandler) {
     throw new Error('no mocks generated for fixture');
   }
 
@@ -99,9 +101,18 @@ async function run() {
     );
   }
 
+  const merged = mergeCatalogs([SLUG]);
+  const primaryRoot = mocksRootFor(merged.catalogs[0] || SLUG);
+  const stubToCatalog = merged.stubToCatalog;
+  const resolveMocksRoot = (stubId) => {
+    const key = stubToCatalog[stubId];
+    return key ? mocksRootFor(key) : primaryRoot;
+  };
+
   // 2. start mock on ephemeral port
   const srv = await startMockServer({
-    mocksRoot,
+    mocksRoot: primaryRoot,
+    resolveMocksRoot,
     host: '127.0.0.1',
     port: 0,
   });

@@ -43,6 +43,9 @@
 | CRUD | 仅对确定性识别的 resource cluster 在 `init`/`generate` **自动**绑 Store；非 CRUD 保持 static cases 或 scenario FSM |
 | 域模型草稿 | `init`/`generate` **静默**写 `models.json` / `domain-draft.md`；高级 `domain-draft` / `materialize-service` 仅用于重绑与排障；表结构 = 虚拟实体 schema，不连真库 |
 | Journal | 命中 Virtual Service 时记入内存并落盘 `.data/service-journal.json`；**`stop` / Ctrl+C 打印一行摘要**；明细用 `service journal` |
+| Catalog 解析真源 | **统一**走 `lib/catalog-merge`：`loadContractsForCatalog` / `handlerExistsForContract` / `listMockKeysForCatalog` / `mocksRootFor`；smoke、list-empty、export-msw、classify/generate 不得再各自假设 `projects/*/mocks` |
+| `start --detach` | 父进程 spawn 独立子进程（`detached`），写 `runtime.json` pid；父进程退出后 session 仍存活；结束用 `mock-skill stop` |
+| 全链 E2E | 通用 `scripts/run-project-e2e.js`（`FRONTEND_DIR` + `MOCK_NAME`）；产品码禁止公司路径/域名硬编码 |
 | 保真度 L3 | store 或 scenario 生效且可 reset |
 
 ## Classify

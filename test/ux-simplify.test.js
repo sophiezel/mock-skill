@@ -21,6 +21,19 @@ beforeEach(() => {
   _resetAllForTests();
 });
 
+test('help mentions --detach for background sessions', () => {
+  const lines = [];
+  const orig = console.log;
+  console.log = (s) => lines.push(String(s));
+  try {
+    help(true);
+    const full = lines.join('\n');
+    assert.ok(full.includes('--detach'));
+  } finally {
+    console.log = orig;
+  }
+});
+
 test('help primary omits service/domain-draft; --all includes them', () => {
   const lines = [];
   const orig = console.log;

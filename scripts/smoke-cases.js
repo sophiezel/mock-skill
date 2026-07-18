@@ -8,6 +8,10 @@ const {
   projectDataDir,
   ensureProjectDirs,
 } = require('../lib/paths');
+const {
+  loadContractsForCatalog,
+  handlerExistsForContract,
+} = require('../lib/catalog-merge');
 const { loadSession } = require('../lib/session-config');
 const { appendAudit } = require('../lib/audit');
 
@@ -57,8 +61,8 @@ async function smokeCases(opts = {}) {
   );
   ensureProjectDirs(projectSlug);
   const cfg = loadSession(projectSlug);
-  const contractsDir = path.join(projectDataDir(projectSlug), 'contracts');
-  if (!fs.existsSync(contractsDir)) {
+  const contracts = loadContractsForCatalog(projectSlug);
+  if (!contracts.length) {
     throw new Error('no contracts — run mock-skill init first');
   }
 
@@ -70,37 +74,12 @@ async function smokeCases(opts = {}) {
 
   const mockBase = `http://${cfg.mock.host}:${cfg.mock.port}`;
   const caseHeader = cfg.proxy?.injectCaseHeader || 'x-mock-case';
-  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
   const results = [];
   let failed = 0;
   let skippedNoHandler = 0;
 
-  function handlerExists(contract) {
-    const rel = String(contract.path || '/').replace(/^\//, '');
-    const candidates = [];
-
-    // New stub catalog layout: mocks/<upstreamId>/<METHOD>/<path>/index.js
-    const upId = contract.upstreamId || '_default';
-    const methods = contract.method || ['GET'];
-    for (const m of (Array.isArray(methods) ? methods : [methods])) {
-      candidates.push(path.join(mocksRoot, upId, String(m).toUpperCase(), rel, 'index.js'));
-    }
-
-    // Old FQDN layout fallback
-    const host = (contract.host || '_default').replace(/[^a-zA-Z0-9._-]+/g, '_');
-    candidates.push(path.join(mocksRoot, host, rel, 'index.js'));
-    candidates.push(path.join(mocksRoot, host.replace(/\./g, '_'), rel, 'index.js'));
-    candidates.push(path.join(mocksRoot, '_default', rel, 'index.js'));
-    candidates.push(path.join(mocksRoot, rel, 'index.js'));
-    return candidates.some((p) => fs.existsSync(p));
-  }
-
-  for (const f of fs.readdirSync(contractsDir).filter((x) => x.endsWith('.json'))) {
-    const contract = JSON.parse(
-      fs.readFileSync(path.join(contractsDir, f), 'utf8'),
-    );
-    // Only smoke APIs that have materialized handlers (contracts-only / skippedEmpty excluded)
-    if (!handlerExists(contract)) {
+  for (const contract of contracts) {
+    if (!handlerExistsForContract(contract, projectSlug)) {
       skippedNoHandler++;
       continue;
     }
@@ -131,7 +110,6 @@ async function smokeCases(opts = {}) {
           ok,
         });
       } catch (e) {
-        // timeout/offline cases are expected to error in ci
         const expectedError = skipCases.has(c.id);
         const ok = expectedError;
         if (!ok) failed++;

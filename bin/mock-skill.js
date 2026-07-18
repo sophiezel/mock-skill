@@ -69,7 +69,7 @@ mock-skill — frontend API mock CLI (single proxy, multi catalog)
 
 Primary:
   mock-skill init [projectDir] [--name=slug] [--task=ID] [--adapter=name] [--force] [--strict-usage]
-  mock-skill start [--name=slug…] [--rules kw…] [--start-url=URL] [--scenario=NAME] [--proxy-host=HOST] [--mitm=1] [--keep-state]
+  mock-skill start [--name=slug…] [--rules kw…] [--start-url=URL] [--scenario=NAME] [--proxy-host=HOST] [--mitm=1] [--keep-state] [--detach]
   mock-skill stop [--auto-merge]
   mock-skill rules list|use <kw…>|save <name> [--rules-dir=DIR]
   mock-skill scenario <name> [--name=slug]
@@ -110,6 +110,7 @@ Flags:
   --record             alone: all-passthrough; with --rules: record passthrough only
   --auto-merge         with stop: run capture-merge after stop
   --keep-state         with start: do not reset Virtual Service store / journal
+  --detach             with start: spawn background session (survives shell exit); stop via mock-skill stop
 `;
 
   const footer = `
@@ -186,6 +187,76 @@ function resolveStartTraffic(f) {
 }
 
 async function runSessionStart(f) {
+  const wantDetach =
+    f.detach === true || f.detach === '1' || f.detach === 1;
+
+  if (wantDetach) {
+    const fs = require('fs');
+    const { spawn } = require('child_process');
+    const {
+      getDataRoot,
+      getGlobalRuntimePath,
+    } = require('../lib/paths');
+    const childArgs = process.argv.slice(2).filter((a) => {
+      if (a === '--detach') return false;
+      if (a.startsWith('--detach=')) return false;
+      return true;
+    });
+    // Detached sessions never auto-launch Chrome (no TTY / no GUI assumption).
+    if (
+      !childArgs.includes('--no-auto-launch') &&
+      !childArgs.some((a) => a.startsWith('--no-auto-launch='))
+    ) {
+      childArgs.push('--no-auto-launch');
+    }
+    const logPath = path.join(getDataRoot(), 'session-start.log');
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    const outFd = fs.openSync(logPath, 'a');
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, 'mock-skill.js'), ...childArgs],
+      {
+        detached: true,
+        stdio: ['ignore', outFd, outFd],
+        env: process.env,
+        cwd: process.cwd(),
+      },
+    );
+    child.unref();
+    try {
+      fs.closeSync(outFd);
+    } catch {
+      /* ignore */
+    }
+
+    const deadline = Date.now() + 10000;
+    let state = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      try {
+        if (!fs.existsSync(getGlobalRuntimePath())) continue;
+        state = JSON.parse(fs.readFileSync(getGlobalRuntimePath(), 'utf8'));
+        if (state?.mock?.pid === child.pid) break;
+      } catch {
+        /* retry */
+      }
+    }
+    console.log(
+      `[mock-skill] detached pid=${child.pid} (stop with: mock-skill stop) log=${logPath}`,
+    );
+    if (state?.mock?.port) {
+      console.log(
+        `[mock-skill] mock http://${state.mock.host || '127.0.0.1'}:${state.mock.port}`,
+      );
+    }
+    if (state?.proxy?.enabled && state.proxy.port) {
+      console.log(
+        `[mock-skill] proxy http://${state.proxy.host || '127.0.0.1'}:${state.proxy.port}`,
+      );
+    }
+    return;
+  }
+
   const { startSession } = require('../scripts/start-session');
   const traffic = resolveStartTraffic(f);
   const wantRules =
