@@ -24,6 +24,8 @@ const {
   mocksRootFor,
   capturesDirFor,
   parseNameList,
+  expandMountKey,
+  readProjectIndex,
 } = require('../lib/catalog-merge');
 const {
   parseRulesKeywords,
@@ -161,16 +163,22 @@ async function startSession(opts = {}) {
     allIfEmpty: true,
   });
   const { ensureServiceDirs } = require('../lib/paths');
-  for (const slug of catalogs) {
-    try {
-      ensureProjectDirs(slug);
-    } catch {
-      /* project dirs optional for pure service mounts */
+  for (const key of catalogs) {
+    const { services, legacyProject } = expandMountKey(key);
+    // Project slug ≠ upstreamId: only ensure project dirs for projects
+    if (readProjectIndex(key) || legacyProject) {
+      try {
+        ensureProjectDirs(key);
+      } catch {
+        /* ignore */
+      }
     }
-    try {
-      ensureServiceDirs(slug);
-    } catch {
-      /* ignore */
+    for (const up of services) {
+      try {
+        ensureServiceDirs(up);
+      } catch {
+        /* ignore */
+      }
     }
   }
 

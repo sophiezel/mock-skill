@@ -31,17 +31,20 @@ disable-model-invocation: true
 | 你正在做 | 先读 |
 |----------|------|
 | 系统学习 L0→L6 | `references/learning-path.md` |
+| 入门 init/start/stop | `references/guide-l0-getting-started.md` |
 | init / 发现 | `references/guide-l1-frontend-infer.md` → `references/infer-from-usage.md` |
 | 分类 / 冲突 | `references/classify-request.md` |
 | 契约 / cases | `references/contract-schema.md` + `references/scenarios.md` |
 | 生成 handler | `references/generate-mock.md` |
 | session / 真机 | `references/guide-l2-runtime.md` → `references/session-and-proxy.md` |
+| Service Catalog | `references/guide-l3-service-catalog.md` |
 | Virtual Service | `references/guide-l4-virtual-service.md` |
+| 后端推导 / domain-draft | `references/guide-l5-backend-inference.md` |
 | 排错 | `references/guide-l6-advanced.md` → `references/pitfalls.md` |
 
 ## Agent checklist
 
-- [ ] 优先 CLI：`mock-skill init` / `session start` / `set-scenario`
+- [ ] 优先 CLI：`mock-skill init` / `start` / `stop` / `scenario`（旧名 `session start` / `set-scenario` 仍可用）
 - [ ] 需求自测提醒 `--task=<需求ID>`（changelog 溯源）
 - [ ] **禁止臆造** `new` 的 IO：无 docs/OpenAPI/用户定义时 BLOCK generate
 - [ ] modify 冲突：展示 `reports/contract-conflicts.md`，未决议不覆盖
@@ -49,10 +52,11 @@ disable-model-invocation: true
 - [ ] 不依赖 Whistle/Charles；真机 Wi‑Fi 代理 → `proxyPort`
 - [ ] CORS 默认 localhost；Hybrid 非 localhost Origin → `cors.extraOrigins`
 - [ ] soft miss：透传 + capture，不因单接口拖垮 session
-- [ ] **E2E 前显式 `set-scenario`**；勿只生成 success 就宣称可测异常路径
-- [ ] `coverage.gaps` 非空时**不宣称 IO 完备**（含 `TRACE_EMPTY`）；需要真实值时显式 `capture-merge`（以 capture 为准，非补洞）
+- [ ] **E2E 前显式 `scenario` / `set-scenario`**；勿只生成 success 就宣称可测异常路径
+- [ ] `coverage.gaps` 非空时**不宣称 IO 完备**（含 `TRACE_EMPTY`）；需要真实值时显式 `merge` / `capture-merge`（以 capture 为准，非补洞）
 - [ ] 普通 `init`/`generate --force` **不得**静默覆盖 `usage+capture`；覆盖须 `--overwrite-capture`
 - [ ] **禁止创造响应字段**：键只来自用法或 capture；faker 只填值不增键
+- [ ] 后台保活用 `start --detach`；结束用 `stop`（勿依赖关终端）
 
 ## 场景决策树
 
@@ -74,9 +78,11 @@ disable-model-invocation: true
 ```bash
 bash scripts/install.sh
 cd <frontend> && mock-skill init [--task=ID] [--related-from=doc]
-mock-skill session start --task=ID --start-url=http://localhost:8080
-mock-skill set-scenario e2e-fault && mock-skill capture-merge
-# HTTPS 改写（可选）: session start --mitm=1 （须信任打印的 CA）
+mock-skill start --name=<slug> [--task=ID] [--start-url=http://localhost:8080]
+# 后台: mock-skill start --name=<slug> --detach
+mock-skill scenario e2e-fault && mock-skill merge
+mock-skill stop
+# HTTPS 改写（可选）: start --mitm=1 （须信任打印的 CA）
 # LAN 开放代理须显式: --allow-open-proxy
 # OpenAPI: mock-skill import-openapi --from=./openapi.json
 ```

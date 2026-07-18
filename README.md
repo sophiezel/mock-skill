@@ -147,15 +147,19 @@ mock-skill export-msw --out=./msw-handlers.js --name=demo
 | [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 已锁定决策（真源） |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构摘要 |
 | [`docs/BACKLOG.md`](./docs/BACKLOG.md) | 未做事项 |
+| [`docs/REPO_MAP.md`](./docs/REPO_MAP.md) | 目录清单（KEEP / UPDATE / DELETE） |
 | [`references/`](./references/) | 操作工具书 |
 | [`SKILL.md`](./SKILL.md) | Agent 编排（可选） |
 | [`docs/README.md`](./docs/README.md) | docs 索引 |
 
 ## 测试
 
+CI（Node 18/20）= `lint` + unit + smoke + upstream-e2e。
+
 ```bash
+npm run lint              # eslint
 npm test                  # 单测
 npm run test:smoke        # fixture smoke
 npm run test:upstream-e2e # multi-host
-npm run test:all          # 全部
+npm run test:all          # unit + smoke + upstream-e2e
 ```

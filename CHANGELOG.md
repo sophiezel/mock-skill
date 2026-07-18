@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Unified catalog resolve APIs in `lib/catalog-merge` (`loadContractsForCatalog`, `handlerExistsForContract`, `listMockKeysForCatalog`, `mocksRootFor`); smoke / list-empty / export-msw / generate read service truth, not project-only mocks
+- `mock-skill start --detach` for background sessions (survives shell exit; stop via `mock-skill stop`)
+- `scripts/run-project-e2e.js` manual full-chain E2E (`FRONTEND_DIR` + `MOCK_NAME`)
+- Silent main path UX: `start` default `resetStore`, `stop` journal one-liner, layered L0–L6 guides
+- `docs/REPO_MAP.md` repository inventory (KEEP / UPDATE / DELETE / MANUAL)
+- Store-backed handlers expose full standard cases (`http_401`…`dep_fail`/`slow`); detail/delete soft-fill when store miss so smoke/CI stay green
+- `test:smoke` isolates via `MOCK_SKILL_DATA_ROOT` (same as unit tests)
+
+### Fixed
+- `start` no longer creates empty `.data/services/<projectSlug>/` shells; `ensureServiceDirs` only runs for real upstreamIds from the project index
+- `mocksRootFor` / `capturesDirFor` ignore leftover `services/<projectSlug>` empties when a project index exists
+- `resolveProjectSlug` accepts multi `--name` array from parseArgs (first element)
+- Session foreground ignores SIGHUP; use `stop` / SIGTERM to end
+
+### Removed
+- Unused `assets/templates/handler.js.tmpl` and `assets/examples/confirmRecycle.contract.json`
+
 ## 1.1.0 — 2026-07-17
 
 ### Security

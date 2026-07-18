@@ -15,12 +15,14 @@ const {
   handlerExistsForContract,
   listMockKeysForCatalog,
   mocksRootFor,
+  capturesDirFor,
   upsertServiceRules,
 } = require('../lib/catalog-merge');
 const {
   ensureServiceDirs,
   serviceStubHandlerPath,
   serviceContractPath,
+  serviceDataDir,
   projectDataDir,
 } = require('../lib/paths');
 
@@ -125,4 +127,30 @@ test('mocksRootFor points at services when present', () => {
     recursive: true,
   });
   assert.ok(mocksRootFor('svc').includes(`${path.sep}services${path.sep}svc`));
+});
+
+test('project slug does not use services/<projectSlug> as mocks/captures root', () => {
+  const up = 'real-api';
+  ensureServiceDirs(up);
+  writeProjectIndex('front-app', {
+    stubs: ['GET real-api/v1/x'],
+    upstreams: [up],
+  });
+  // Simulate leftover empty shell under services/front-app
+  ensureServiceDirs('front-app');
+
+  const root = mocksRootFor('front-app');
+  assert.ok(
+    root.includes(`${path.sep}services${path.sep}${up}`),
+    `expected upstream mocks, got ${root}`,
+  );
+  assert.ok(!root.includes(`${path.sep}services${path.sep}front-app`));
+
+  const caps = capturesDirFor('front-app');
+  assert.ok(
+    caps.includes(`${path.sep}projects${path.sep}front-app${path.sep}captures`),
+    `expected project captures, got ${caps}`,
+  );
+  assert.notEqual(caps, path.join(serviceDataDir('front-app'), 'captures'));
+  assert.ok(fs.existsSync(projectDataDir('front-app')));
 });

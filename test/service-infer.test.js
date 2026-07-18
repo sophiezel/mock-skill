@@ -78,6 +78,45 @@ test('store handler create then list shares state', () => {
   assert.equal(listed.response.data[0].name, 'Ada');
 });
 
+test('store handler honors full case set including http_401', () => {
+  const src = renderStoreHandler({
+    resource: 'users',
+    op: 'list',
+    stubId: 'GET api/users',
+  });
+  const run = new Function('module', 'exports', `${src}\nreturn module.exports;`);
+  const handler = run({ exports: {} }, {});
+  const store = getStore('api-cases');
+  const res = handler({
+    headers: { 'x-mock-case': 'http_401' },
+    store,
+    path: '/users',
+    query: {},
+  });
+  assert.equal(res.httpStatus, 401);
+  assert.equal(res.response.code, 401);
+});
+
+test('store detail success soft-fills when row missing', () => {
+  _resetAllForTests();
+  const src = renderStoreHandler({
+    resource: 'users',
+    op: 'detail',
+    stubId: 'GET api/users/1',
+  });
+  const run = new Function('module', 'exports', `${src}\nreturn module.exports;`);
+  const handler = run({ exports: {} }, {});
+  const store = getStore('api-detail');
+  const res = handler({
+    headers: {},
+    store,
+    path: '/users/1',
+    query: {},
+  });
+  assert.equal(res.httpStatus, 200);
+  assert.equal(res.response.data.id, '1');
+});
+
 test('materializeStoreHandlers writes store handlers + models', () => {
   ensureServiceDirs('shop');
   upsertServiceRules('shop', [
