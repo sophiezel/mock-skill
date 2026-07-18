@@ -26,12 +26,16 @@ LLM 介入边界（摘要；**真源**见 [`DECISIONS.md`](./DECISIONS.md) § LL
 
 ## Stub Catalog
 
-一个 stub = 一个逻辑 API（`METHOD + upstreamId + path`），多环境 host 作为匹配器（`hosts[]`），不再按 FQDN 分目录。
+一个 stub = 一个逻辑 API（`METHOD + upstreamId + path`），**真源挂在服务目录**：
 
 ```
-mocks/<upstreamId>/<METHOD>/<path>/index.js   ← 一套 mock 数据
-proxy-rules.json: { stubId, upstreamId, hosts[], pathPrefix, methods }
-upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
+.data/services/<upstreamId>/
+  mocks/<METHOD>/<path>/index.js
+  contracts/
+  proxy-rules.json
+  upstreams.json
+  models.json
+.data/projects/<slug>/index.json   ← 该前端发现的 stub / upstream 索引
 ```
 
 - `upstreamId`：逻辑服务标识（来自 `hostVar` / `prefixKey` / 归一化 host label），不含 FQDN。
@@ -39,6 +43,7 @@ upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
 - `stubId`：全链路统一身份（infer → classify → contract → proxy-rules → runtime → set-case → capture → smoke → audit → openapi → export-msw）。
 - 代理零侵入：客户端仍打真实域名，proxy 命中后注入 `x-mock-stub-id` 路由到 mock handler。
 - Catalog 可全量生成；**运行时是否 mock** 由 `trafficMode` 决定（见下）。
+- 同 `upstreamId` 可被多前端共享；Virtual Service 的 Store 按 upstream 作用域。
 
 通用性：引擎不含业务仓硬编码、不依赖特定公司域名。
 
@@ -58,6 +63,17 @@ upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
 
 细节与 port 匹配见 [`references/session-and-proxy.md`](../references/session-and-proxy.md)。
 
+## Virtual Backend 分层
+
+```
+Proxy → TrafficPolicy → VirtualService → Handler
+                              ├─ ServiceStore (per upstreamId)
+                              ├─ ScenarioFSM
+                              └─ StaticCases
+```
+
+构建期在 `init/generate` 后可跑：`operation-intent` → `resource-cluster` →（可选）`domain-draft` → materialize store handlers。
+
 ## 保真度与 Shape
 
 | 级 | 含义 | 升阶 |
@@ -65,7 +81,7 @@ upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
 | **L0** | 空信封，无 shape | `import-openapi` / 更好用法 / capture |
 | **L1** | usage/OpenAPI shape + 占位值 | `traffic` 透传 + `capture-merge` |
 | **L2** | 已 capture 真值 | 可选 scenario |
-| **L3** | 场景 / 有状态（预留） | — |
+| **L3** | Store 有状态 / Scenario FSM（可 reset） | `service reset` / scenario reset |
 
 **纪律**：Shape 永不发明键；真值只来自 capture / OpenAPI；materialize（jsf）只填已有键。
 
@@ -82,15 +98,20 @@ rules/                         共享 rule 包（可 git；不绑 project）
 .data/
   session.json                 全局运行时：端口 / trafficMode / allowlist / cases / activeCatalogs
   runtime.json                 当前进程状态
-  projects/<projectSlug>/      catalog（按源码 init）
-    mocks/
+  services/<upstreamId>/       Service Catalog（真源）
+    mocks/<METHOD>/<path>/index.js
     contracts/
-    captures/
     proxy-rules.json
     upstreams.json
-    reports/
+    models.json                虚拟实体（可选）
+    domain-draft.md            确认前草稿（可选）
+  projects/<projectSlug>/      前端发现索引 + 项目侧产物
+    index.json                 stubs[] / upstreams[]
+    classify/ captures/ reports/ audit/ scenarios/
+    proxy-rules.json           legacy 兼容（generate 仍可写聚合视图）
 ```
 
-- **一个** proxy + mock 进程；`start --name=a --name=b` 合并多份 catalog。
-- stubId 跨 catalog 冲突 → 启动失败（不静默覆盖）。
+- **一个** proxy + mock 进程；`start --name=a --name=b` 按 project 索引展开到 services。
+- 同一 `upstreamId` 被多前端发现时 **共享** `.data/services/<upstreamId>/`。
+- stubId 跨不同服务冲突 → 启动失败（不静默覆盖）。
 - `--task` 只做需求溯源，**不**拆分 mock 目录。

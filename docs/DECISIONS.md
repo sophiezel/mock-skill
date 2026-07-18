@@ -1,6 +1,6 @@
 # mock-skill 定稿决策
 
-最后同步：2026-07-17。与 archive 中历史计划不一致时，以本文 + 代码为准。
+最后同步：2026-07-19。与 archive 中历史计划不一致时，以本文 + 代码为准。
 
 ## 产品定位
 
@@ -23,14 +23,26 @@
 | 项 | 定稿 |
 |----|------|
 | 运行时 | **全局** `.data/session.json` + `.data/runtime.json`（单 mock 服务） |
-| Catalog | `.data/projects/<projectSlug>/`（contracts / mocks / captures / reports / audit / scenarios） |
+| **Service Catalog（真源）** | `.data/services/<upstreamId>/`（mocks / contracts / proxy-rules / upstreams / models） |
+| **Project 索引** | `.data/projects/<projectSlug>/`：`index.json`（发现到的 stub 列表）+ classify / captures / reports / audit / scenarios |
 | Rules | 包根 `rules/*.json`（或 `--rules-dir` / `MOCK_SKILL_RULES_DIR`）；跨 project 共享 |
-| 多 catalog | `start --name=a --name=b` 合并挂载；省略 `--name` = 全部有 proxy-rules 的 catalog |
-| 否决 | 默认「每 project 一份运行时 session / 各起一个代理」 |
+| 多 catalog | `start --name=a --name=b` 按 **project 索引**展开到 services 合并挂载；省略 `--name` = 全部有 proxy-rules 的 **services**（legacy project proxy-rules 仍可读） |
+| 否决 | 默认「每 project 一份运行时 session / 各起一个代理」；否决「mocks 真源长期挂在 frontend project 下」 |
 | 无 `_project/`、无按 task 拆分的 mock 层 | 已否决 |
 | `--task` | 仅审计/溯源（`lastTaskId`、`audit/changelog.jsonl`、契约 history），不分区存储 |
 | Chrome profile | `.data/chrome-profiles/<primaryCatalog>/` |
 | `.data` | gitignore |
+
+## Virtual Backend（Stub Catalog → 服务层）
+
+| 项 | 定稿 |
+|----|------|
+| 定位 | 在现有 discover + proxy 之上增加 **Virtual Service**：可 mock 响应，也可 mock 同 upstream 的状态与副作用 |
+| 热路径 | proxy → Virtual Service **禁止 LLM**（确定性） |
+| Store | 按 `upstreamId` 作用域的内存 KV / collection；`service reset` 可清空 |
+| CRUD | 仅对确定性识别的 resource cluster 自动绑 Store；非 CRUD 保持 static cases 或 scenario FSM |
+| 域模型草稿 | `domain-draft` 产出 `models.json` / `domain-draft.md`，**须确认**后 materialize；表结构 = 虚拟实体 schema，不连真库 |
+| 保真度 L3 | store 或 scenario 生效且可 reset |
 
 ## Classify
 

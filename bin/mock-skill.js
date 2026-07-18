@@ -72,6 +72,9 @@ Primary:
   mock-skill start [--name=slug…] [--rules kw…] [--start-url=URL] [--scenario=NAME] [--proxy-host=HOST] [--mitm=1]
   mock-skill stop [--auto-merge]
   mock-skill rules list|use <kw…>|save <name> [--rules-dir=DIR]
+  mock-skill service reset|journal|status [--upstream=ID]
+  mock-skill domain-draft --upstream=ID [--confirm]
+  mock-skill materialize-service --upstream=ID [--force]
   mock-skill scenario <name> [--name=slug]
   mock-skill smoke [--name=slug] [--ci] [--cases=...] [--scenario=NAME]
 
@@ -110,7 +113,8 @@ Flags:
 
   const footer = `
 Install: bash scripts/install.sh
-Catalog: .data/projects/<slug>/   Session: .data/session.json   Rules: rules/
+Catalog: .data/services/<upstreamId>/   Project index: .data/projects/<slug>/
+Session: .data/session.json   Rules: rules/
 Help:    mock-skill help --all
 `;
 
@@ -355,6 +359,21 @@ async function main() {
     }
     console.error('Usage: mock-skill rules list|use <kw…>|save <name>');
     process.exit(1);
+  }
+  if (cmd === 'service') {
+    const { runService } = require('../scripts/service-cli');
+    runService({ _: [cmd, ...rest], flags: f });
+    return;
+  }
+  if (cmd === 'domain-draft') {
+    const { runDomainDraft } = require('../scripts/domain-draft-cli');
+    runDomainDraft({ _: [cmd, ...rest], flags: f });
+    return;
+  }
+  if (cmd === 'materialize-service') {
+    const { runMaterializeService } = require('../scripts/domain-draft-cli');
+    runMaterializeService({ _: [cmd, ...rest], flags: f });
+    return;
   }
   if (cmd === 'scenario') {
     runScenario(f, rest[0]);

@@ -120,9 +120,16 @@ function resolveStubHandlerFile(mocksRoot, ctx = {}) {
     const m = (parsed.method || method || 'GET').toUpperCase();
     const relative = String(parsed.path || urlPath || '').replace(/^\//, '');
     if (isUnsafeRelative(relative)) return null;
-    const file = path.join(root, up, m, relative, 'index.js');
-    const jailed = jailPath(root, file);
-    if (jailed && fs.existsSync(jailed)) return jailed;
+    // Service catalog: mocksRoot = services/<up>/mocks → METHOD/path
+    // Legacy project: mocksRoot = projects/<slug>/mocks → upstreamId/METHOD/path
+    const candidates = [
+      path.join(root, m, relative, 'index.js'),
+      path.join(root, up, m, relative, 'index.js'),
+    ];
+    for (const file of candidates) {
+      const jailed = jailPath(root, file);
+      if (jailed && fs.existsSync(jailed)) return jailed;
+    }
     return null;
   }
   const root = path.resolve(mocksRoot);
@@ -135,9 +142,14 @@ function resolveStubHandlerFile(mocksRoot, ctx = {}) {
     const m = (method || 'GET').toUpperCase();
     const relative = String(urlPath || '').replace(/^\//, '');
     if (isUnsafeRelative(relative)) return null;
-    const file = path.join(root, cleanUp, m, relative, 'index.js');
-    const jailed = jailPath(root, file);
-    if (jailed && fs.existsSync(jailed)) return jailed;
+    const candidates = [
+      path.join(root, m, relative, 'index.js'),
+      path.join(root, cleanUp, m, relative, 'index.js'),
+    ];
+    for (const file of candidates) {
+      const jailed = jailPath(root, file);
+      if (jailed && fs.existsSync(jailed)) return jailed;
+    }
     return null;
   }
 
@@ -246,6 +258,27 @@ function createRouter({ mocksRoot, caseHeader, resolveMocksRoot = null }) {
         req.query.__mockCase ||
         req.query.mockCase;
 
+      let upstreamId = null;
+      let stubIdDecoded = stubIdHeader ? String(stubIdHeader) : null;
+      if (stubIdDecoded) {
+        try {
+          stubIdDecoded = decodeURIComponent(stubIdDecoded);
+          const { parseStubId } = require('../../lib/paths');
+          upstreamId = parseStubId(stubIdDecoded).upstreamId;
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const { getStore, appendJournal } = require('../../lib/service-store');
+      const store = getStore(upstreamId || '_default');
+      appendJournal({
+        stubId: stubIdDecoded,
+        method: req.method,
+        path: req.path,
+        upstreamId: upstreamId || '_default',
+      });
+
       const result = await fn({
         method: req.method,
         query: req.query,
@@ -254,6 +287,9 @@ function createRouter({ mocksRoot, caseHeader, resolveMocksRoot = null }) {
         headers: req.headers,
         path: req.path,
         caseId: mockCase,
+        store,
+        upstreamId: upstreamId || '_default',
+        stubId: stubIdDecoded,
       });
 
       // Legacy: handler returned a plain envelope body. Default 200, no delay/fault.

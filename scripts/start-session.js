@@ -146,7 +146,19 @@ async function startSession(opts = {}) {
     names: names.length ? names : undefined,
     allIfEmpty: true,
   });
-  for (const slug of catalogs) ensureProjectDirs(slug);
+  const { ensureServiceDirs } = require('../lib/paths');
+  for (const slug of catalogs) {
+    try {
+      ensureProjectDirs(slug);
+    } catch {
+      /* project dirs optional for pure service mounts */
+    }
+    try {
+      ensureServiceDirs(slug);
+    } catch {
+      /* ignore */
+    }
+  }
 
   const merged = mergeCatalogs(catalogs);
   saveSession({ activeCatalogs: catalogs });

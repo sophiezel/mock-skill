@@ -1,0 +1,48 @@
+'use strict';
+
+const { resetStore, readJournal, clearJournal, getStore } = require('../lib/service-store');
+
+/**
+ * CLI: mock-skill service reset|journal|status
+ * @param {{ _: string[], flags: Record<string, any> }} args
+ */
+function runService(args) {
+  const sub = args._[1] || args._[0];
+  const flags = args.flags || {};
+
+  if (sub === 'reset') {
+    const up = flags.upstream || flags.name || null;
+    const result = resetStore(up === true ? null : up);
+    console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+    return;
+  }
+
+  if (sub === 'journal') {
+    if (flags.clear) {
+      clearJournal();
+      console.log(JSON.stringify({ ok: true, cleared: true }, null, 2));
+      return;
+    }
+    const limit = flags.limit != null ? Number(flags.limit) : 50;
+    console.log(JSON.stringify({ ok: true, entries: readJournal(limit) }, null, 2));
+    return;
+  }
+
+  if (sub === 'status') {
+    const up = flags.upstream || flags.name;
+    if (!up || up === true) {
+      console.log(JSON.stringify({ ok: true, message: 'pass --upstream=<id>' }, null, 2));
+      return;
+    }
+    console.log(JSON.stringify({ ok: true, ...getStore(up).snapshot() }, null, 2));
+    return;
+  }
+
+  console.log(`Usage:
+  mock-skill service reset [--upstream=ID]
+  mock-skill service journal [--limit=N] [--clear]
+  mock-skill service status --upstream=ID
+`);
+}
+
+module.exports = { runService };

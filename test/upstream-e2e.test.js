@@ -110,20 +110,26 @@ test('E2E: multi-host fixture — full stub catalog pipeline', () => {
     assert.ok(stageMatch, 'stage host should match');
     assert.equal(prodMatch.stubId, stageMatch.stubId, 'both env hosts should match the same stub');
 
-    // Step 6: router resolveStubHandlerFile — stub header resolves to handler
-    const handlerFile = resolveStubHandlerFile(
-      path.join(projectDataDir(slug), 'mocks'),
-      { stubId: prodMatch.stubId, method: 'GET', urlPath: '/v1/items' },
-    );
+    // Step 6: router resolveStubHandlerFile — service mocks root
+    const { mocksRootForStub } = require('../lib/catalog-merge');
+    const { serviceDataDir } = require('../lib/paths');
+    const svcRoot = mocksRootForStub(prodMatch.stubId);
+    const handlerFile = resolveStubHandlerFile(svcRoot, {
+      stubId: prodMatch.stubId,
+      method: 'GET',
+      urlPath: '/v1/items',
+    });
     assert.ok(handlerFile, 'handler should resolve by stubId');
     assert.ok(fs.existsSync(handlerFile), `handler file should exist: ${handlerFile}`);
 
-    // Step 7: No FQDN directories in mocks/
-    const mocksRoot = path.join(projectDataDir(slug), 'mocks');
-    const entries = fs.readdirSync(mocksRoot);
-    assert.ok(!entries.some((e) => e.includes('.')), `no FQDN directories: ${JSON.stringify(entries)}`);
-    assert.ok(entries.includes('svcAPrefix'), 'svcAPrefix directory exists');
-    assert.ok(entries.includes('svcBPrefix'), 'svcBPrefix directory exists');
+    // Step 7: handlers live under services/, not FQDN project dirs
+    assert.ok(fs.existsSync(serviceDataDir('svcAPrefix')), 'svcAPrefix service catalog');
+    assert.ok(fs.existsSync(serviceDataDir('svcBPrefix')), 'svcBPrefix service catalog');
+    const projectMocks = path.join(projectDataDir(slug), 'mocks');
+    if (fs.existsSync(projectMocks)) {
+      const entries = fs.readdirSync(projectMocks);
+      assert.ok(!entries.some((e) => e.includes('.example.')), `no FQDN directories: ${JSON.stringify(entries)}`);
+    }
   });
 });
 

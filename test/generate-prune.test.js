@@ -18,6 +18,7 @@ const {
 function withTempProject(fn) {
   const slug = `prune-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const root = projectDataDir(slug);
+  const { serviceDataDir } = require('../lib/paths');
   fs.mkdirSync(path.join(root, 'mocks'), { recursive: true });
   fs.mkdirSync(path.join(root, 'contracts'), { recursive: true });
   fs.mkdirSync(path.join(root, 'audit'), { recursive: true });
@@ -25,6 +26,13 @@ function withTempProject(fn) {
     return fn(slug);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    for (const up of ['prune-svc', 'orphan-svc']) {
+      try {
+        fs.rmSync(serviceDataDir(up), { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 
@@ -33,10 +41,10 @@ function makeRole(overrides = {}) {
     role: 'modify',
     method: 'GET',
     path: '/v1/items/detail',
-    upstreamId: 'svc-a',
+    upstreamId: 'prune-svc',
     hosts: ['api.example.com'],
     canonicalHost: 'api.example.com',
-    stubId: 'GET svc-a/v1/items/detail',
+    stubId: 'GET prune-svc/v1/items/detail',
     exportHint: 'getItem',
     responseShape: {
       type: 'object',
@@ -72,7 +80,7 @@ test('generate force: prunes orphan handlers and contracts', () => {
     assert.ok(!fs.existsSync(orphanHandler), 'orphan handler should be removed');
     assert.ok(!fs.existsSync(contractPath(slug, orphanKey)), 'orphan contract should be removed');
 
-    const keepHandler = stubHandlerPath(slug, 'svc-a', 'GET', '/v1/items/detail');
+    const keepHandler = stubHandlerPath(slug, 'prune-svc', 'GET', '/v1/items/detail');
     assert.ok(fs.existsSync(keepHandler), 'whitelist handler should remain');
   });
 });
@@ -82,7 +90,7 @@ test('generate: empty + exportHint still materializes handler (no_property_acces
     const roles = [
       makeRole({
         path: '/v1/addr/init',
-        stubId: 'GET svc-a/v1/addr/init',
+        stubId: 'GET prune-svc/v1/addr/init',
         exportHint: 'initAddr',
         responseShape: { type: 'object', props: {} },
         coverage: {
@@ -101,7 +109,7 @@ test('generate: empty + exportHint still materializes handler (no_property_acces
     );
     assert.equal(rules.length, 1, 'exportHint empty shape still enters proxy-rules');
     assert.ok(
-      fs.existsSync(stubHandlerPath(slug, 'svc-a', 'GET', '/v1/addr/init')),
+      fs.existsSync(stubHandlerPath(slug, 'prune-svc', 'GET', '/v1/addr/init')),
       'handler should be rendered',
     );
   });
@@ -112,7 +120,7 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
     const roles = [
       makeRole({
         path: '/v1/addr/orphan',
-        stubId: 'GET svc-a/v1/addr/orphan',
+        stubId: 'GET prune-svc/v1/addr/orphan',
         exportHint: null,
         responseShape: { type: 'object', props: {} },
         coverage: {
@@ -129,10 +137,10 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
       fs.readFileSync(path.join(projectDataDir(slug), 'proxy-rules.json'), 'utf8'),
     );
     assert.equal(rules.length, 0, 'empty+no_export_symbol must not enter proxy-rules');
-    const key = 'GET svc-a/v1/addr/orphan';
+    const key = 'GET prune-svc/v1/addr/orphan';
     assert.ok(fs.existsSync(contractPath(slug, key)), 'contract should still be written');
     assert.ok(
-      !fs.existsSync(stubHandlerPath(slug, 'svc-a', 'GET', '/v1/addr/orphan')),
+      !fs.existsSync(stubHandlerPath(slug, 'prune-svc', 'GET', '/v1/addr/orphan')),
       'handler should not be rendered',
     );
   });
@@ -140,7 +148,7 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
 
 test('pruneOrphanArtifacts: keeps mock-skill:manual handlers', () => {
   withTempProject((slug) => {
-    const handler = stubHandlerPath(slug, 'svc-a', 'GET', '/v1/manual');
+    const handler = stubHandlerPath(slug, 'prune-svc', 'GET', '/v1/manual');
     fs.mkdirSync(path.dirname(handler), { recursive: true });
     fs.writeFileSync(
       handler,

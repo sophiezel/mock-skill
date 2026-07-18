@@ -9,6 +9,7 @@ const {
 } = require('../scripts/generate-mock');
 const {
   projectDataDir,
+  serviceDataDir,
   stubHandlerPath,
   contractPath,
   stubId,
@@ -24,6 +25,11 @@ function withTempProject(fn) {
     return fn(slug);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    try {
+      fs.rmSync(serviceDataDir('svc-a'), { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -58,15 +64,19 @@ test('G1: generate writes handler at stubHandlerPath (no FQDN dir), rule.hosts>=
     const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
     assert.equal(gen.generated, 1);
 
-    // Handler at mocks/svc-a/GET/v1/items/index.js — NOT mocks/svc-a.example.com/...
+    // Handler under services/<upstreamId>/mocks/<METHOD>/...
     const handlerFile = stubHandlerPath(slug, 'svc-a', 'GET', '/v1/items');
     assert.ok(fs.existsSync(handlerFile), `handler should exist at ${handlerFile}`);
+    assert.ok(
+      handlerFile.includes(`${path.sep}services${path.sep}svc-a${path.sep}`),
+      'handler lives under services catalog',
+    );
 
-    // No FQDN directory
+    // No FQDN directory under project mocks
     const mocksRoot = path.join(projectDataDir(slug), 'mocks');
-    const entries = fs.readdirSync(mocksRoot);
+    const entries = fs.existsSync(mocksRoot) ? fs.readdirSync(mocksRoot) : [];
     assert.ok(!entries.includes('svc-a.example.com'), 'no FQDN directory');
-    assert.ok(entries.includes('svc-a'), 'upstreamId directory exists');
+    assert.ok(fs.existsSync(serviceDataDir('svc-a')), 'service catalog exists');
 
     // proxy-rules: 1 rule with hosts.length>=2
     const rules = JSON.parse(

@@ -153,11 +153,15 @@ function captureMerge(projectSlug, opts = {}) {
     const host = cap.host || '_default';
     const method = (cap.method || 'GET').toUpperCase();
 
+    // Prefer legacy FQDN-keyed contract when present (pre-service-catalog captures)
+    const legacyKey = apiKey({ host, method, path: cap.path });
+    let contract = contracts.get(legacyKey) || null;
+
     // Resolve upstream from host
     let upstreamId = hostToUpstream(host, upstreamsData);
     let learnedHost = false;
 
-    if (!upstreamId && host !== '_default') {
+    if (!contract && !upstreamId && host !== '_default') {
       // Try to find a unique contract matching path+method
       const matches = [];
       for (const [id, c] of contracts) {
@@ -167,6 +171,7 @@ function captureMerge(projectSlug, opts = {}) {
       }
       if (matches.length === 1) {
         upstreamId = matches[0].upstreamId || '_default';
+        contract = matches[0];
         // Learn the host into upstreams.json
         const up = upstreamsData.upstreams[upstreamId] || { hosts: [], canonicalHost: null };
         if (!up.hosts.includes(host)) {
@@ -188,16 +193,25 @@ function captureMerge(projectSlug, opts = {}) {
       }
     }
 
-    const id = makeStubId({ upstreamId: upstreamId || '_default', method, path: cap.path });
-    let contract = contracts.get(id);
     if (!contract) {
-      // Fallback: try old apiKey
-      contract = contracts.get(apiKey({ host, method, path: cap.path }));
+      const id = makeStubId({ upstreamId: upstreamId || '_default', method, path: cap.path });
+      contract = contracts.get(id);
     }
     if (!contract) {
       skipped.push({ file: f, reason: 'no_contract', host, path: cap.path, method });
       continue;
     }
+
+    // Keep upstreamId aligned with contract when known
+    if (!upstreamId) {
+      upstreamId = contract.upstreamId || '_default';
+    }
+
+    const id = contract.stubId || contract.id || makeStubId({
+      upstreamId,
+      method,
+      path: cap.path,
+    });
 
     let body = cap.responseBody;
     if (typeof body === 'string') {
@@ -267,8 +281,13 @@ function captureMerge(projectSlug, opts = {}) {
       method,
       contract.path,
     );
-    if (fs.existsSync(handlerFile) && !fs.readFileSync(handlerFile, 'utf8').includes('mock-skill:manual')) {
-      fs.writeFileSync(handlerFile, renderHandler(contract));
+    // Also update legacy FQDN handler if present
+    const { mockHandlerPath } = require('../lib/paths');
+    const legacyHandler = mockHandlerPath(projectSlug, host, contract.path);
+    for (const file of [handlerFile, legacyHandler]) {
+      if (fs.existsSync(file) && !fs.readFileSync(file, 'utf8').includes('mock-skill:manual')) {
+        fs.writeFileSync(file, renderHandler(contract));
+      }
     }
 
     appendAudit(projectSlug, {

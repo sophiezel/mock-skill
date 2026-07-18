@@ -31,10 +31,19 @@ mock-skill start --name=demo
 # mock-skill start --name=demo --start-url=http://localhost:8080
 ```
 
-Catalog（mocks / contracts）在 `.data/projects/demo/`；运行时状态在全局 `.data/session.json`。停掉：
+Catalog（真源）在 `.data/services/<upstreamId>/`；项目索引在 `.data/projects/demo/index.json`；运行时状态在全局 `.data/session.json`。停掉：
 
 ```bash
 mock-skill stop
+```
+
+有状态服务（同 upstream 共享内存 Store）：
+
+```bash
+mock-skill domain-draft --upstream=prefix-api
+mock-skill materialize-service --upstream=prefix-api
+mock-skill service reset --upstream=prefix-api
+mock-skill service journal
 ```
 
 多个前端可同时挂到同一个代理：
