@@ -30,8 +30,8 @@
 | 否决 | 默认「每 project 一份运行时 session / 各起一个代理」；否决「mocks 真源长期挂在 frontend project 下」 |
 | 无 `_project/`、无按 task 拆分的 mock 层 | 已否决 |
 | `--task` | 仅审计/溯源（`lastTaskId`、`audit/changelog.jsonl`、契约 history），不分区存储 |
-| Chrome profile | `.data/chrome-profiles/<primaryCatalog>/` |
-| `.data` | gitignore |
+| Chrome profile | `.data/chrome-profiles/<primaryCatalog>/`（**仅 autoLaunch Chrome 时创建**；`ensureProjectDirs` 不再预建） |
+| `.data` | gitignore；**单测经 `test/_isolate-data-root.cjs` 写入临时目录**，不污染仓库 `.data/services` / `projects` |
 
 ## Virtual Backend（Stub Catalog → 服务层）
 
@@ -97,7 +97,7 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 | 真机 | 设备 Wi‑Fi 手动代理 → `proxyPort`（同 Whistle）；业务代码零改 |
 | proxy 绑定 | 桌面-only 可 `127.0.0.1`；真机/E2E 场景须 `0.0.0.0`，启动日志打印 **LAN IP:port** 供手机填写 |
 | LAN 安全 | **仅信任局域网，勿在公共 Wi‑Fi 开 0.0.0.0** |
-| mock 命中 | `mocks/<host>/<url-path>/index.js` |
+| mock 命中 | `.data/services/<upstreamId>/mocks/<METHOD>/<path>/index.js`（legacy project mocks 仍可读） |
 | miss | soft：透传 + capture，不因单接口拖垮 session |
 | CORS | 默认 localhost Origin；OPTIONS → 204；Hybrid WebView 非 localhost Origin 走 `cors.extraOrigins`（不实现「万能 Origin」） |
 | HTTPS | 默认 CONNECT 隧道透传；可选 `--mitm=1` 对命中 rules 的 host 做本地 CA MITM（须信任 CA） |
@@ -141,9 +141,9 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 - 不把公司域名/鉴权/封装写入默认核心路径
 - 不默认改业务仓 baseURL / 植入 MSW
 - 不引入 WireMock/Java 作为运行时依赖
-- 不在本迭代做完整 MITM / OpenAPI import / 状态机平台 / Admin HTTP API / 证书自动安装 / Appium 插件
+- 不把 Advanced CLI（`service` / `domain-draft` / …）塞进默认主路径
+- 不做完整状态机平台 / Admin HTTP UI / Appium 插件（见 BACKLOG P2）
 
-## 后续（见 docs/BACKLOG.md）
+## 后续
 
-- 1.1.0 已交付：OpenAPI import、when 匹配、stateful times、export-msw、最小 HTTPS MITM
-- 后续：证书一键信任、YAML OpenAPI、infer 进一步拆分
+未交付项只登记在 [`BACKLOG.md`](./BACKLOG.md)。

@@ -8,11 +8,11 @@
   "scripts": {
     "mock-skill": "node ./bin/mock-skill.js",
     "install:local": "bash ./scripts/install.sh",
-    "test": "node --test test/*.test.js",
+    "test": "node --require ./test/_isolate-data-root.cjs --test test/*.test.js",
     "test:smoke": "node scripts/run-fixture-smoke.js",
-    "test:upstream-e2e": "node --test test/upstream-e2e.test.js",
+    "test:upstream-e2e": "node --require ./test/_isolate-data-root.cjs --test test/upstream-e2e.test.js",
     "test:all": "npm test && npm run test:smoke && npm run test:upstream-e2e",
-    "test:coverage": "c8 --reporter=text --reporter=lcov --check-coverage --lines 60 node --test test/*.test.js",
+    "test:coverage": "c8 --reporter=text --reporter=lcov --check-coverage --lines 60 node --require ./test/_isolate-data-root.cjs --test test/*.test.js",
     "lint": "eslint bin lib runtime scripts test adapters --max-warnings 50"
   },
   "engines": {

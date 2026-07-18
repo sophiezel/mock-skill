@@ -64,6 +64,33 @@ test('U6: parseStubId handles upstream id with dashes', () => {
   assert.equal(parsed.path, '/v2/foo/bar');
 });
 
+test('ensureProjectDirs does not create chrome-profiles (no garbage)', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const {
+    ensureProjectDirs,
+    chromeProfileDir,
+    ensureChromeProfileDir,
+    projectDataDir,
+    getDataRoot,
+  } = require('../lib/paths');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mock-chrome-'));
+  const prev = process.env.MOCK_SKILL_DATA_ROOT;
+  process.env.MOCK_SKILL_DATA_ROOT = tmp;
+  try {
+    const slug = 'no-chrome-leak';
+    ensureProjectDirs(slug);
+    assert.ok(fs.existsSync(projectDataDir(slug)));
+    assert.ok(!fs.existsSync(chromeProfileDir(slug)));
+    assert.ok(!fs.existsSync(path.join(getDataRoot(), 'chrome-profiles')));
+    ensureChromeProfileDir(slug);
+    assert.ok(fs.existsSync(chromeProfileDir(slug)));
+  } finally {
+    process.env.MOCK_SKILL_DATA_ROOT = prev;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('U6: stubId rejects FQDN as upstreamId (guard)', () => {
   // upstreamId must not be a FQDN; stubId should still format but downstream
   // collapse must never pass a FQDN. Here we only assert the formatter does not

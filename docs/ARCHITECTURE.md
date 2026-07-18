@@ -98,6 +98,8 @@ rules/                         共享 rule 包（可 git；不绑 project）
 .data/
   session.json                 全局运行时：端口 / trafficMode / allowlist / cases / activeCatalogs
   runtime.json                 当前进程状态
+  service-journal.json         Virtual Service 命中日志（跨进程 stop 摘要）
+  chrome-profiles/<slug>/      仅 autoLaunch Chrome 时创建
   services/<upstreamId>/       Service Catalog（真源）
     mocks/<METHOD>/<path>/index.js
     contracts/
@@ -115,3 +117,4 @@ rules/                         共享 rule 包（可 git；不绑 project）
 - 同一 `upstreamId` 被多前端发现时 **共享** `.data/services/<upstreamId>/`。
 - stubId 跨不同服务冲突 → 启动失败（不静默覆盖）。
 - `--task` 只做需求溯源，**不**拆分 mock 目录。
+- 单测默认写入临时 `MOCK_SKILL_DATA_ROOT`，不污染本仓 `.data`。

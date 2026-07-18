@@ -3,7 +3,7 @@
 ## 模型
 
 - **一个**全局 session（`.data/session.json`）：端口、`trafficMode`、`mockAllowlist`、`cases`、`activeCatalogs`。
-- Catalog 仍按源码在 `.data/projects/<slug>/`；`start` 可同时挂多份。
+- Catalog **真源**在 `.data/services/<upstreamId>/`；project 侧是索引（`index.json`）与 captures/scenarios。`start` 可同时挂多份。
 - 共享 rule 包在包根 `rules/`（见下）。
 
 ## 开关

@@ -143,12 +143,13 @@ mock-skill export-msw --out=./msw-handlers.js --name=demo
 
 | 文档 | 内容 |
 |------|------|
-| [`references/learning-path.md`](./references/learning-path.md) | **L0→L6 分层渐进引导（推荐系统学习）** |
-| [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构与设计 |
-| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 已锁定决策 |
-| [`references/`](./references/) | 扫描、session、场景、E2E、坑（工具书） |
+| [`references/learning-path.md`](./references/learning-path.md) | L0→L6 分层引导（推荐系统学习） |
+| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 已锁定决策（真源） |
+| [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构摘要 |
+| [`docs/BACKLOG.md`](./docs/BACKLOG.md) | 未做事项 |
+| [`references/`](./references/) | 操作工具书 |
 | [`SKILL.md`](./SKILL.md) | Agent 编排（可选） |
-| [`docs/README.md`](./docs/README.md) | 文档索引 |
+| [`docs/README.md`](./docs/README.md) | docs 索引 |
 
 ## 测试
 

@@ -9,6 +9,7 @@ const {
   ensureProjectDirs,
   projectDataDir,
   chromeProfileDir,
+  ensureChromeProfileDir,
 } = require('../lib/paths');
 const {
   loadSession,
@@ -352,6 +353,7 @@ async function startSession(opts = {}) {
 
   let chromePid = null;
   if (cfg.proxy.enabled && cfg.browser.autoLaunch && chrome && fs.existsSync(chrome)) {
+    ensureChromeProfileDir(primary);
     const args = [
       `--user-data-dir=${userDataDir}`,
       `--proxy-server=${proxyServerArg}`,
