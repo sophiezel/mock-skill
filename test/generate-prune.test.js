@@ -8,7 +8,12 @@ const {
   generateMocks,
   pruneOrphanArtifacts,
 } = require('../scripts/generate-mock');
-const { projectDataDir, mockHandlerPath, contractPath, apiKey } = require('../lib/paths');
+const {
+  projectDataDir,
+  stubHandlerPath,
+  contractPath,
+  stubId,
+} = require('../lib/paths');
 
 function withTempProject(fn) {
   const slug = `prune-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -23,46 +28,51 @@ function withTempProject(fn) {
   }
 }
 
+function makeRole(overrides = {}) {
+  return {
+    role: 'modify',
+    method: 'GET',
+    path: '/v1/items/detail',
+    upstreamId: 'svc-a',
+    hosts: ['api.example.com'],
+    canonicalHost: 'api.example.com',
+    stubId: 'GET svc-a/v1/items/detail',
+    exportHint: 'getItem',
+    responseShape: {
+      type: 'object',
+      props: { item_id: { type: 'unknown' } },
+    },
+    coverage: {
+      request: { keysFound: [], confidence: 'high' },
+      response: { pathsFound: ['item_id'], confidence: 'high' },
+      enums: [],
+      gaps: [],
+    },
+    ...overrides,
+  };
+}
+
 test('generate force: prunes orphan handlers and contracts', () => {
   withTempProject((slug) => {
-    const orphanHost = 'www.w3.org';
-    const orphanPath = '/2000/svg';
-    const orphanHandler = mockHandlerPath(slug, orphanHost, orphanPath);
+    // Create an orphan handler under the new layout
+    const orphanUp = 'orphan-svc';
+    const orphanHandler = stubHandlerPath(slug, orphanUp, 'GET', '/v1/orphan');
     fs.mkdirSync(path.dirname(orphanHandler), { recursive: true });
     fs.writeFileSync(orphanHandler, 'module.exports = () => ({});\n');
-    const orphanKey = apiKey({ host: orphanHost, method: 'GET', path: orphanPath });
+    const orphanKey = stubId({ upstreamId: orphanUp, method: 'GET', path: '/v1/orphan' });
     fs.writeFileSync(
       contractPath(slug, orphanKey),
-      JSON.stringify({ id: orphanKey, host: orphanHost, path: orphanPath, method: ['GET'] }, null, 2),
+      JSON.stringify({ id: orphanKey, stubId: orphanKey, upstreamId: orphanUp, path: '/v1/orphan', method: ['GET'] }, null, 2),
     );
 
-    const roles = [
-      {
-        role: 'modify',
-        host: 'api.example.com',
-        path: '/v1/items/detail',
-        method: 'GET',
-        exportHint: 'getItem',
-        responseShape: {
-          type: 'object',
-          props: { item_id: { type: 'unknown' } },
-        },
-        coverage: {
-          request: { keysFound: [], confidence: 'high' },
-          response: { pathsFound: ['item_id'], confidence: 'high' },
-          enums: [],
-          gaps: [],
-        },
-      },
-    ];
-
+    const roles = [makeRole()];
     const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
     assert.ok(gen.prunedHandlers >= 1, `expected prunedHandlers>=1 got ${gen.prunedHandlers}`);
     assert.ok(gen.prunedContracts >= 1, `expected prunedContracts>=1 got ${gen.prunedContracts}`);
     assert.ok(!fs.existsSync(orphanHandler), 'orphan handler should be removed');
     assert.ok(!fs.existsSync(contractPath(slug, orphanKey)), 'orphan contract should be removed');
 
-    const keepHandler = mockHandlerPath(slug, 'api.example.com', '/v1/items/detail');
+    const keepHandler = stubHandlerPath(slug, 'svc-a', 'GET', '/v1/items/detail');
     assert.ok(fs.existsSync(keepHandler), 'whitelist handler should remain');
   });
 });
@@ -70,11 +80,9 @@ test('generate force: prunes orphan handlers and contracts', () => {
 test('generate: empty + exportHint still materializes handler (no_property_access alone is not contract-only)', () => {
   withTempProject((slug) => {
     const roles = [
-      {
-        role: 'modify',
-        host: 'api.example.com',
+      makeRole({
         path: '/v1/addr/init',
-        method: 'GET',
+        stubId: 'GET svc-a/v1/addr/init',
         exportHint: 'initAddr',
         responseShape: { type: 'object', props: {} },
         coverage: {
@@ -83,7 +91,7 @@ test('generate: empty + exportHint still materializes handler (no_property_acces
           enums: [],
           gaps: ['no_property_access'],
         },
-      },
+      }),
     ];
     const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
     assert.equal(gen.skippedEmptyCount, 0);
@@ -93,7 +101,7 @@ test('generate: empty + exportHint still materializes handler (no_property_acces
     );
     assert.equal(rules.length, 1, 'exportHint empty shape still enters proxy-rules');
     assert.ok(
-      fs.existsSync(mockHandlerPath(slug, 'api.example.com', '/v1/addr/init')),
+      fs.existsSync(stubHandlerPath(slug, 'svc-a', 'GET', '/v1/addr/init')),
       'handler should be rendered',
     );
   });
@@ -102,11 +110,9 @@ test('generate: empty + exportHint still materializes handler (no_property_acces
 test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () => {
   withTempProject((slug) => {
     const roles = [
-      {
-        role: 'modify',
-        host: 'api.example.com',
+      makeRole({
         path: '/v1/addr/orphan',
-        method: 'GET',
+        stubId: 'GET svc-a/v1/addr/orphan',
         exportHint: null,
         responseShape: { type: 'object', props: {} },
         coverage: {
@@ -115,7 +121,7 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
           enums: [],
           gaps: ['no_export_symbol'],
         },
-      },
+      }),
     ];
     const gen = generateMocks({ projectSlug: slug, roles, force: true, merge: false });
     assert.equal(gen.skippedEmptyCount, 1);
@@ -123,10 +129,10 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
       fs.readFileSync(path.join(projectDataDir(slug), 'proxy-rules.json'), 'utf8'),
     );
     assert.equal(rules.length, 0, 'empty+no_export_symbol must not enter proxy-rules');
-    const key = apiKey({ host: 'api.example.com', method: 'GET', path: '/v1/addr/orphan' });
+    const key = 'GET svc-a/v1/addr/orphan';
     assert.ok(fs.existsSync(contractPath(slug, key)), 'contract should still be written');
     assert.ok(
-      !fs.existsSync(mockHandlerPath(slug, 'api.example.com', '/v1/addr/orphan')),
+      !fs.existsSync(stubHandlerPath(slug, 'svc-a', 'GET', '/v1/addr/orphan')),
       'handler should not be rendered',
     );
   });
@@ -134,7 +140,7 @@ test('generate: empty + no_export_symbol is contract-only (no proxy rule)', () =
 
 test('pruneOrphanArtifacts: keeps mock-skill:manual handlers', () => {
   withTempProject((slug) => {
-    const handler = mockHandlerPath(slug, 'api.example.com', '/v1/manual');
+    const handler = stubHandlerPath(slug, 'svc-a', 'GET', '/v1/manual');
     fs.mkdirSync(path.dirname(handler), { recursive: true });
     fs.writeFileSync(
       handler,

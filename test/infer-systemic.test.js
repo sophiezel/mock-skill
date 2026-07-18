@@ -196,7 +196,8 @@ export default {
     (root) => {
       const apis = inferApiUsage(root, { forceRefresh: true });
       const demos = apis.filter((a) => a.path === '/demo/list');
-      assert.equal(demos.length, 2, JSON.stringify(demos));
+      assert.equal(demos.length, 1, `expected 1 collapsed stub, got ${demos.length}: ${JSON.stringify(demos)}`);
+      assert.equal(demos[0].hosts.length, 2, '2 env hosts collapsed into one stub');
       assert.ok(demos.every((a) => a.exportHint === 'getDemo'));
       assert.ok(demos.every((a) => a.method === 'GET'));
       const withShape = demos.find((a) => shapeKeys(a).includes('name'));

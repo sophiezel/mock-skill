@@ -65,18 +65,30 @@ async function initProject(opts = {}) {
     existingContracts,
   });
 
-  // Carry enrichment fields from apis onto roles
-  const apiByKey = new Map(
-    apiList.map((a) => [
+  // Carry enrichment fields from apis onto roles (keyed by stubId)
+  const apiByKey = new Map();
+  for (const a of apiList) {
+    const sid =
+      a.stubId ||
+      `${(a.method || 'GET').toUpperCase()} ${(a.upstreamId || a.host || '_default')}${a.path}`;
+    apiByKey.set(sid, a);
+    // legacy FQDN key for transitional lookup
+    apiByKey.set(
       `${(a.method || 'GET').toUpperCase()} ${a.host || '_default'}${a.path}`,
       a,
-    ]),
-  );
+    );
+  }
   classified.roles = classified.roles.map((r) => {
-    const a = apiByKey.get(r.apiKey);
+    const a = apiByKey.get(r.stubId || r.apiKey) || apiByKey.get(r.apiKey);
     if (!a) return r;
     return {
       ...r,
+      stubId: a.stubId || r.stubId || r.apiKey,
+      upstreamId: a.upstreamId || r.upstreamId,
+      hosts: a.hosts?.length ? [...a.hosts] : r.hosts || [],
+      canonicalHost: a.canonicalHost || r.canonicalHost || null,
+      hostVar: a.hostVar || r.hostVar || null,
+      prefixKey: a.prefixKey || r.prefixKey || null,
       queryHints: a.queryHints || r.queryHints,
       bodyHints: a.bodyHints || r.bodyHints,
       responseHints: a.responseHints || r.responseHints,
@@ -121,6 +133,29 @@ async function initProject(opts = {}) {
     .slice(0, 40)
     .map((g) => `- \`${g.id}\`: ${g.gaps.join(', ')}`);
 
+  // Stub-level metrics (post-collapse)
+  const stubSet = new Set();
+  const upstreamSet = new Set();
+  let multiHostStubs = 0;
+  let emptyStubs = 0;
+  const emptyStubIds = [];
+  for (const a of apiList) {
+    const sid = a.stubId || a.id;
+    if (!stubSet.has(sid)) {
+      stubSet.add(sid);
+      if (a.upstreamId) upstreamSet.add(a.upstreamId);
+      if (a.hosts?.length >= 2) multiHostStubs++;
+      const src = a.responseShape || {};
+      const isEmpty = !src.props || (src.type === 'object' && Object.keys(src.props).length === 0);
+      if (isEmpty) {
+        emptyStubs++;
+        emptyStubIds.push(sid);
+      }
+    }
+  }
+  const stubsTotal = stubSet.size;
+  const upstreamsTotal = upstreamSet.size;
+
   const md = [
     '# mock-skill init report',
     '',
@@ -128,6 +163,10 @@ async function initProject(opts = {}) {
     `- projectSlug: \`${projectSlug}\``,
     `- taskId: \`${taskId || 'adhoc'}\``,
     `- discovered: ${apiList.length}`,
+    `- stubsTotal: ${stubsTotal}`,
+    `- upstreamsTotal: ${upstreamsTotal}`,
+    `- multiHostStubs: ${multiHostStubs}`,
+    `- emptyStubs: ${emptyStubs}`,
     `- generated: ${gen.generated}`,
     `- reused: ${gen.reused}`,
     `- skipped: ${gen.skipped}`,
@@ -146,10 +185,20 @@ async function initProject(opts = {}) {
     `- capturePreserved: ${gen.capturePreservedCount || 0}`,
     `- gatewayFilteredRoles: ${gen.gatewayFilteredRoles || 0}`,
     '',
+    '## Stub catalog',
+    '',
+    `- **stubsTotal**: ${stubsTotal} unique stubs (METHOD + upstreamId + path), collapsed from ${apiList.length} API rows.`,
+    `- **upstreamsTotal**: ${upstreamsTotal} unique upstream service identities.`,
+    `- **multiHostStubs**: ${multiHostStubs} stubs with multiple environment hosts (matched via hosts[]).`,
+    `- **emptyStubs**: ${emptyStubs} stubs with no response shape — candidates for capture-merge.`,
+    '',
     '## Coverage note',
     '',
-    '- **emptyData**：`success.data` 无字段（静态用法倒推未抽出 props）。含多环境 host 副本，数字会被放大。',
-    '- **usageBackedHints / emptyDataHints**：按 `exportHint` 去重后的接口函数数，更接近「有多少 service 导出没抽到字段」。',
+    '- **stubsTotal / upstreamsTotal**: post-collapse counts. One stub = one logical API; multi-env hosts are matchers, not duplicates.',
+    '- **emptyStubs**: stubs with empty `responseShape`. These are generated as contract-only (no handler) when `no_export_symbol` gap exists. Run `mock-skill capture-merge` to fill them with real response data.',
+    '- **multiHostStubs**: stubs that match multiple environment hosts (e.g., prod + stage). The proxy matches any host in `hosts[]` to the same stub.',
+    '- **emptyData**：`success.data` 无字段（静态用法倒推未抽出 props）。',
+    '- **usageBackedHints / emptyDataHints**：按 `exportHint` 去重后的接口函数数。',
     '- **gaps**：静态分析声明的缺口（如 `no_export_symbol` / `no_callsite` / `TRACE_EMPTY` / `bind_ambiguous`）。',
     '- **TRACE_EMPTY**：有调用点但响应 shape 仍空——分层 trace 失败，不是「生成成功」。',
     '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` → 只写 contract、不渲空 handler、不进 proxy-rules。',
@@ -169,6 +218,9 @@ async function initProject(opts = {}) {
     gapLines.length
       ? `## gapApis (sample)\n\n${gapLines.join('\n')}\n`
       : '',
+    emptyStubIds.length
+      ? `## Empty stubs (candidates for capture-merge)\n\n${emptyStubIds.slice(0, 50).map((id) => `- \`${id}\``).join('\n')}\n`
+      : '',
     '## Next',
     '',
     '```bash',
@@ -185,6 +237,11 @@ async function initProject(opts = {}) {
     `${JSON.stringify(
       {
         discovered: apiList.length,
+        stubsTotal,
+        upstreamsTotal,
+        multiHostStubs,
+        emptyStubs,
+        emptyStubIds,
         usageBackedCount: gen.usageBackedCount,
         emptyDataCount: gen.emptyDataCount,
         usageBackedHints: gen.usageBackedHints,
@@ -216,7 +273,7 @@ async function initProject(opts = {}) {
     console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
   }
   console.log(
-    `[mock-skill] done generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
+    `[mock-skill] done stubs=${stubsTotal} upstreams=${upstreamsTotal} multiHost=${multiHostStubs} empty=${emptyStubs} generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
   );
 
   if (strictUsage && (gen.traceEmptyCount || 0) > 0) {

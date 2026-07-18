@@ -49,7 +49,8 @@ async function verifyScenarioViaProxy(proxyUrl, rules, expectedStatus, proxy) {
   }
   let fails = 0;
   for (const rule of rules) {
-    const target = `http://${rule.host}${rule.pathPrefix}`;
+    const ruleHost = rule.hosts?.[0] || rule.host || '127.0.0.1';
+    const target = `http://${ruleHost}${rule.pathPrefix}`;
     try {
       const res = await reqProxy(proxyUrl, target);
       if (res.status !== expectedStatus) {

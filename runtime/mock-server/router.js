@@ -33,6 +33,10 @@ function isUnsafeRelative(relative) {
 /**
  * Resolve handler file under mocksRoot with path jail.
  * Exported for unit tests.
+ *
+ * Checks both layouts:
+ * 1. New stub catalog: mocks/<upstreamId>/<METHOD>/<path>/index.js
+ * 2. Old FQDN layout: mocks/<host>/<path>/index.js
  */
 function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
   const clean = urlPath.replace(/\/+$/, '') || '/';
@@ -42,6 +46,21 @@ function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
   const root = path.resolve(mocksRoot);
   const candidates = [];
 
+  // New stub catalog layout: derive upstreamId from host label
+  if (hostHeader) {
+    const rawHost = String(hostHeader).split(':')[0];
+    const { normalizeHostLabel } = require('../../lib/upstream');
+    const upId = normalizeHostLabel(rawHost);
+    if (upId && upId !== 'default' && !upId.includes('..')) {
+      // We don't know METHOD here (router.all handles all methods);
+      // check all common methods
+      for (const m of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+        candidates.push(path.join(root, upId, m, relative, 'index.js'));
+      }
+    }
+  }
+
+  // Old FQDN layout
   if (hostHeader) {
     const host = String(hostHeader).split(':')[0].replace(/[^a-zA-Z0-9._-]+/g, '_');
     if (host && !host.includes('..')) {
@@ -57,6 +76,63 @@ function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
     if (!jailed) continue;
     if (fs.existsSync(jailed)) return jailed;
   }
+  return null;
+}
+
+/**
+ * Resolve a stub handler file by upstream identity (new catalog layout).
+ *
+ * Primary path (proxy traffic with stub header):
+ *   1. Read x-mock-stub-id → parse METHOD / upstreamId / pathname
+ *      → mocks/<upstreamId>/<METHOD>/<cleanPath>/index.js
+ *   2. Not found → null (404)
+ *
+ * Direct mock port (no proxy, no stub header):
+ *   1. Read x-forwarded-host → hostToUpstream(host) + req.method + req.path
+ *      → mocks/<upstreamId>/<METHOD>/<cleanPath>/index.js
+ *   2. Host not registered → null (404)
+ *
+ * @param {string} mocksRoot
+ * @param {{ stubId?: string|null, method?: string, urlPath?: string, upstreamId?: string|null, forwardedHost?: string|null, hostToUpstream?: ((host: string) => string|null) }} ctx
+ * @returns {string|null}
+ */
+function resolveStubHandlerFile(mocksRoot, ctx = {}) {
+  const root = path.resolve(mocksRoot);
+  const { stubId, method, urlPath, upstreamId, forwardedHost, hostToUpstream } = ctx;
+
+  // Primary: stub header from proxy
+  if (stubId) {
+    let parsed;
+    try {
+      const { parseStubId } = require('../../lib/paths');
+      parsed = parseStubId(decodeURIComponent(stubId));
+    } catch {
+      return null;
+    }
+    const up = (parsed.upstreamId || '').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    const m = (parsed.method || method || 'GET').toUpperCase();
+    const relative = String(parsed.path || urlPath || '').replace(/^\//, '');
+    if (isUnsafeRelative(relative)) return null;
+    const file = path.join(root, up, m, relative, 'index.js');
+    const jailed = jailPath(root, file);
+    if (jailed && fs.existsSync(jailed)) return jailed;
+    return null;
+  }
+
+  // Direct: host → upstream mapping
+  if (forwardedHost && typeof hostToUpstream === 'function') {
+    const up = hostToUpstream(forwardedHost);
+    if (!up) return null;
+    const cleanUp = up.replace(/[^a-zA-Z0-9._-]+/g, '_');
+    const m = (method || 'GET').toUpperCase();
+    const relative = String(urlPath || '').replace(/^\//, '');
+    if (isUnsafeRelative(relative)) return null;
+    const file = path.join(root, cleanUp, m, relative, 'index.js');
+    const jailed = jailPath(root, file);
+    if (jailed && fs.existsSync(jailed)) return jailed;
+    return null;
+  }
+
   return null;
 }
 
@@ -110,7 +186,17 @@ function createRouter({ mocksRoot, caseHeader }) {
 
   const handler = async (req, res) => {
     const host = req.headers['x-forwarded-host'] || req.headers.host || '';
-    const filePath = resolveHandlerFile(mocksRoot, req.path, host);
+    const stubIdHeader = req.headers['x-mock-stub-id'] || null;
+    let filePath;
+    if (stubIdHeader) {
+      filePath = resolveStubHandlerFile(mocksRoot, {
+        stubId: stubIdHeader,
+        method: req.method,
+        urlPath: req.path,
+      });
+    } else {
+      filePath = resolveHandlerFile(mocksRoot, req.path, host);
+    }
 
     if (!filePath) {
       res.status(404).json({
@@ -205,6 +291,7 @@ function createRouter({ mocksRoot, caseHeader }) {
 
 module.exports = createRouter;
 module.exports.resolveHandlerFile = resolveHandlerFile;
+module.exports.resolveStubHandlerFile = resolveStubHandlerFile;
 module.exports.jailPath = jailPath;
 module.exports.clearHandlerCache = clearHandlerCache;
 module.exports.loadHandler = loadHandler;

@@ -69,29 +69,34 @@ test('discoverHostVarAssignments: keeps all env hosts for apiPrefix', () => {
   });
 });
 
-test('infer: $HTTP.getP `${apiPrefix}/path` expands all env hosts', () => {
+test('infer: $HTTP.getP `${apiPrefix}/path` collapses all env hosts into one stub', () => {
   withTempProject({ 'src/service/index.js': SERVICE_SRC }, (root) => {
     const apis = inferApiUsage(root, { withUsageIo: false, forceRefresh: true });
     const listApis = apis.filter(
       (a) => a.path === '/exposure/sunflower/list' && a.method === 'GET',
     );
-    assert.equal(listApis.length, 4, JSON.stringify(listApis));
-    const hosts = listApis.map((a) => a.host).sort();
+    assert.equal(listApis.length, 1, `expected 1 collapsed stub, got ${listApis.length}: ${JSON.stringify(listApis)}`);
+    const stub = listApis[0];
+    assert.equal(stub.hosts.length, 4, `hosts should have 4 entries: ${JSON.stringify(stub.hosts)}`);
+    const hosts = [...stub.hosts].sort();
     assert.deepEqual(hosts, [
       'api-preview.chesupai.cn',
       'api.chesupai.cn',
       'apitest.chesupai.net.cn',
       'appstage.chesupai.net.cn',
     ]);
-    assert.ok(listApis.every((a) => a.exportHint === 'getList'));
+    assert.ok(stub.exportHint === 'getList');
+    assert.ok(stub.upstreamId, 'upstreamId should be set');
+    assert.ok(stub.stubId, 'stubId should be set');
   });
 });
 
-test('infer: $HTTP.postP maps to POST and expands apiOrder hosts', () => {
+test('infer: $HTTP.postP maps to POST and collapses apiOrder hosts', () => {
   withTempProject({ 'src/service/index.js': SERVICE_SRC }, (root) => {
     const apis = inferApiUsage(root, { withUsageIo: false, forceRefresh: true });
     const posts = apis.filter((a) => a.path === '/order/commit');
-    assert.equal(posts.length, 4, JSON.stringify(posts));
+    assert.equal(posts.length, 1, `expected 1 collapsed stub, got ${posts.length}`);
+    assert.equal(posts[0].hosts.length, 4, '4 env hosts collapsed');
     assert.ok(posts.every((a) => a.method === 'POST'));
     assert.ok(posts.every((a) => a.exportHint === 'commitOrder'));
   });

@@ -10,7 +10,8 @@
     "install:local": "bash ./scripts/install.sh",
     "test": "node --test test/*.test.js",
     "test:smoke": "node scripts/run-fixture-smoke.js",
-    "test:all": "npm test && npm run test:smoke",
+    "test:upstream-e2e": "node --test test/upstream-e2e.test.js",
+    "test:all": "npm test && npm run test:smoke && npm run test:upstream-e2e",
     "test:coverage": "c8 --reporter=text --reporter=lcov --check-coverage --lines 60 node --test test/*.test.js",
     "lint": "eslint bin lib runtime scripts test adapters --max-warnings 50"
   },

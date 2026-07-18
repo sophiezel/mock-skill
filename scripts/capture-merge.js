@@ -9,12 +9,14 @@ const {
   ensureProjectDirs,
   projectDataDir,
   contractPath,
-  mockHandlerPath,
+  stubHandlerPath,
+  stubId: makeStubId,
   apiKey,
 } = require('../lib/paths');
 const { appendAudit } = require('../lib/audit');
 const { renderHandler, loadExistingContracts } = require('./generate-mock');
 const { isPlaceholderValue } = require('../lib/materialize');
+const { normalizeHostLabel } = require('../lib/upstream');
 
 function deepMergeShape(target, sample) {
   if (sample == null) return target;
@@ -85,16 +87,41 @@ function mergeDataAdditive(existing, incoming) {
   return out;
 }
 
+function loadUpstreams(projectSlug) {
+  const p = path.join(projectDataDir(projectSlug), 'upstreams.json');
+  if (!fs.existsSync(p)) return { version: 1, upstreams: {} };
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return { version: 1, upstreams: {} };
+  }
+}
+
+function saveUpstreams(projectSlug, data) {
+  const p = path.join(projectDataDir(projectSlug), 'upstreams.json');
+  fs.writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+function hostToUpstream(host, upstreams) {
+  if (!host) return null;
+  for (const [upId, info] of Object.entries(upstreams.upstreams || {})) {
+    if ((info.hosts || []).includes(host)) return upId;
+  }
+  return null;
+}
+
 function captureMerge(projectSlug, opts = {}) {
   ensureProjectDirs(projectSlug);
-  const capturesDir = path.join(projectDataDir(projectSlug), 'captures');
+  const capturesDir = opts.capturesDir || path.join(projectDataDir(projectSlug), 'captures');
   if (!fs.existsSync(capturesDir)) {
     console.log('[mock-skill] no captures dir');
     return { merged: 0 };
   }
 
   const contracts = loadExistingContracts(projectSlug);
+  const upstreamsData = loadUpstreams(projectSlug);
   let merged = 0;
+  let anyLearnedHost = false;
   const skipped = [];
 
   for (const f of fs.readdirSync(capturesDir)) {
@@ -114,7 +141,7 @@ function captureMerge(projectSlug, opts = {}) {
       skipped.push({
         file: f,
         reason: 'empty_responseBody',
-        hint: 'capture had no body — backend may be down, or write miss was blocked (blockWritePassthrough). Try soft passthrough with a live upstream, or --record-mock-hits after mock is seeded.',
+        hint: 'capture had no body',
         host: cap.host,
         path: cap.path,
         method: cap.method,
@@ -123,13 +150,52 @@ function captureMerge(projectSlug, opts = {}) {
     }
     const host = cap.host || '_default';
     const method = (cap.method || 'GET').toUpperCase();
-    const id = apiKey({ host, method, path: cap.path });
+
+    // Resolve upstream from host
+    let upstreamId = hostToUpstream(host, upstreamsData);
+    let learnedHost = false;
+
+    if (!upstreamId && host !== '_default') {
+      // Try to find a unique contract matching path+method
+      const matches = [];
+      for (const [id, c] of contracts) {
+        if (c.path === cap.path && (c.method || ['GET']).includes(method)) {
+          matches.push(c);
+        }
+      }
+      if (matches.length === 1) {
+        upstreamId = matches[0].upstreamId || '_default';
+        // Learn the host into upstreams.json
+        const up = upstreamsData.upstreams[upstreamId] || { hosts: [], canonicalHost: null };
+        if (!up.hosts.includes(host)) {
+          up.hosts.push(host);
+          upstreamsData.upstreams[upstreamId] = up;
+          learnedHost = true;
+          anyLearnedHost = true;
+        }
+      } else {
+        skipped.push({
+          file: f,
+          reason: 'unknown_or_ambiguous_host',
+          host,
+          path: cap.path,
+          method,
+          matchCount: matches.length,
+        });
+        continue;
+      }
+    }
+
+    const id = makeStubId({ upstreamId: upstreamId || '_default', method, path: cap.path });
     let contract = contracts.get(id);
     if (!contract) {
-      // try GET default
-      contract = contracts.get(apiKey({ host, method: 'GET', path: cap.path }));
+      // Fallback: try old apiKey
+      contract = contracts.get(apiKey({ host, method, path: cap.path }));
     }
-    if (!contract) continue;
+    if (!contract) {
+      skipped.push({ file: f, reason: 'no_contract', host, path: cap.path, method });
+      continue;
+    }
 
     let body = cap.responseBody;
     if (typeof body === 'string') {
@@ -147,7 +213,7 @@ function captureMerge(projectSlug, opts = {}) {
     if (!success) continue;
     const prev = success.response?.data;
     const next = mergeDataAdditive(prev, data);
-    if (JSON.stringify(prev) === JSON.stringify(next)) continue;
+    if (JSON.stringify(prev) === JSON.stringify(next) && !learnedHost) continue;
 
     success.response.data = next;
     contract.response = contract.response || {};
@@ -176,10 +242,15 @@ function captureMerge(projectSlug, opts = {}) {
       ],
     };
 
-    const cPath = contractPath(projectSlug, contract.id);
+    const cPath = contractPath(projectSlug, contract.id || id);
     fs.writeFileSync(cPath, `${JSON.stringify(contract, null, 2)}\n`);
 
-    const handlerFile = mockHandlerPath(projectSlug, contract.host, contract.path);
+    const handlerFile = stubHandlerPath(
+      projectSlug,
+      contract.upstreamId || upstreamId || '_default',
+      method,
+      contract.path,
+    );
     if (fs.existsSync(handlerFile) && !fs.readFileSync(handlerFile, 'utf8').includes('mock-skill:manual')) {
       fs.writeFileSync(handlerFile, renderHandler(contract));
     }
@@ -187,10 +258,14 @@ function captureMerge(projectSlug, opts = {}) {
     appendAudit(projectSlug, {
       command: 'capture-merge',
       taskId: opts.taskId || null,
-      apiKey: contract.id,
-      summary: 'merged capture response into contract',
+      apiKey: contract.id || id,
+      summary: learnedHost ? 'merged capture + learned host alias' : 'merged capture response into contract',
     });
     merged++;
+  }
+
+  if (anyLearnedHost) {
+    saveUpstreams(projectSlug, upstreamsData);
   }
 
   if (skipped.length) {

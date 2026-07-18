@@ -98,8 +98,8 @@ function startProxyServer(opts) {
   function resolveCaseId(cs, rule, method, hostname, urlPath) {
     const engine = currentStateful();
     const keys = [
+      rule.stubId || rule.id,
       rule.id,
-      `${method} ${hostname}${urlPath}`,
     ];
     if (engine) {
       for (const k of keys) {
@@ -108,8 +108,8 @@ function startProxyServer(opts) {
       }
     }
     return (
+      cs.active?.[rule.stubId] ||
       cs.active?.[rule.id] ||
-      cs.active?.[`${method} ${hostname}${urlPath}`] ||
       cs.default ||
       'success'
     );
@@ -236,6 +236,12 @@ function startProxyServer(opts) {
         headers.host = mockUrl.host;
         headers['x-forwarded-host'] = hostname;
         headers[caseHeader] = caseId;
+        if (rule.stubId) {
+          headers['x-mock-stub-id'] = encodeURIComponent(rule.stubId);
+        }
+        if (rule.upstreamId) {
+          headers['x-mock-upstream'] = rule.upstreamId;
+        }
         delete headers['content-length'];
 
         const mockPath = urlPath + target.search;
@@ -477,6 +483,12 @@ function startProxyServer(opts) {
       headers.host = mockUrl.host;
       headers['x-forwarded-host'] = hostname;
       headers[caseHeader] = caseId;
+      if (rule.stubId) {
+        headers['x-mock-stub-id'] = encodeURIComponent(rule.stubId);
+      }
+      if (rule.upstreamId) {
+        headers['x-mock-upstream'] = rule.upstreamId;
+      }
       delete headers['content-length'];
 
       const mockReq = http.request(

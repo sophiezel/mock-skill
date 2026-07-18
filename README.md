@@ -77,6 +77,24 @@ mock-skill generate --force --overwrite-capture  # 显式允许 usage 覆盖 cap
 
 `--task` 只做需求溯源（契约 history / `audit/changelog.jsonl`），**不**拆分 mock 目录。无任务全量 init 时分类启发式为 `dependency`（不强制 LLM）。
 
+### Stub Catalog（多环境 host 共享一套 mock）
+
+一个 stub = 一个逻辑 API（`METHOD + upstreamId + path`），多环境 host 作为匹配器（`hosts[]`），不再按 FQDN 分目录。
+
+```
+mocks/<upstreamId>/<METHOD>/<path>/index.js   ← 一套 mock 数据
+proxy-rules.json: { stubId, upstreamId, hosts[], pathPrefix, methods }
+upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
+```
+
+- `upstreamId`：逻辑服务标识（来自 `hostVar` 变量名 / `prefixKey` / 归一化 host label），不含 FQDN。
+- `hosts[]`：该服务所有环境域名（prod / stage / dev / ...），proxy 命中任一即路由到同一 stub。
+- `stubId`：全链路统一身份（infer → classify → contract → proxy-rules → runtime → set-case → capture → smoke → audit → openapi → export-msw）。
+- 代理零侵入：客户端仍打真实域名，proxy 命中后注入 `x-mock-stub-id` header 路由到 mock handler。
+- 空 stub 闭环：无字段也能生成 contract、列出、由 capture-merge 填充；指标按 stub 计数（`stubsTotal` / `emptyStubs` / `multiHostStubs`）。
+
+**通用性约束**：本工具不含任何业务仓硬编码、不依赖特定公司域名或内部服务名。同一份代码可 `init` 任意前端项目。
+
 ## 自测 Session
 
 ```bash
@@ -170,6 +188,8 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 ```bash
 npm test                 # node:test 单测 + 集成
 npm run test:smoke       # fixtures/generic-web：init → smoke --ci → set-scenario → proxy
+npm run test:upstream-e2e # fixtures/multi-host-web：infer → collapse → generate → proxy match → router
+npm run test:all         # 全部
 ```
 
 ## Agent Skill（可选）

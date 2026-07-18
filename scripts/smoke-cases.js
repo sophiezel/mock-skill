@@ -76,14 +76,22 @@ async function smokeCases(opts = {}) {
   let skippedNoHandler = 0;
 
   function handlerExists(contract) {
-    const host = (contract.host || '_default').replace(/[^a-zA-Z0-9._-]+/g, '_');
     const rel = String(contract.path || '/').replace(/^\//, '');
-    const candidates = [
-      path.join(mocksRoot, host, rel, 'index.js'),
-      path.join(mocksRoot, host.replace(/\./g, '_'), rel, 'index.js'),
-      path.join(mocksRoot, '_default', rel, 'index.js'),
-      path.join(mocksRoot, rel, 'index.js'),
-    ];
+    const candidates = [];
+
+    // New stub catalog layout: mocks/<upstreamId>/<METHOD>/<path>/index.js
+    const upId = contract.upstreamId || '_default';
+    const methods = contract.method || ['GET'];
+    for (const m of (Array.isArray(methods) ? methods : [methods])) {
+      candidates.push(path.join(mocksRoot, upId, String(m).toUpperCase(), rel, 'index.js'));
+    }
+
+    // Old FQDN layout fallback
+    const host = (contract.host || '_default').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    candidates.push(path.join(mocksRoot, host, rel, 'index.js'));
+    candidates.push(path.join(mocksRoot, host.replace(/\./g, '_'), rel, 'index.js'));
+    candidates.push(path.join(mocksRoot, '_default', rel, 'index.js'));
+    candidates.push(path.join(mocksRoot, rel, 'index.js'));
     return candidates.some((p) => fs.existsSync(p));
   }
 
@@ -103,10 +111,13 @@ async function smokeCases(opts = {}) {
 
       const url = `${mockBase}${contract.path}`;
       const expected = expectedStatusFor(c.id, c);
+      const fwdHost = contract.hosts?.[0] || contract.host || 'localhost';
+      const stubIdVal = contract.stubId || contract.id;
       try {
         const res = await requestJson(url, {
           [caseHeader]: c.id,
-          'x-forwarded-host': contract.host === '_default' ? 'localhost' : contract.host,
+          'x-forwarded-host': fwdHost === '_default' ? 'localhost' : fwdHost,
+          'x-mock-stub-id': encodeURIComponent(stubIdVal),
           host: `${cfg.mock.host}:${cfg.mock.port}`,
         });
         const ok = ci ? res.status === expected : true;

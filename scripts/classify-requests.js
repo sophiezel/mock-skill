@@ -6,6 +6,7 @@ const {
   ensureProjectDirs,
   projectDataDir,
   apiKey,
+  stubId: makeStubId,
   sanitizeSlug,
 } = require('../lib/paths');
 
@@ -49,11 +50,20 @@ function classifyRequests(opts) {
   const conflicts = [];
 
   for (const api of apis) {
-    const key = apiKey(api);
-    const hasMock = existingMockKeys.has(key) || existingMockKeys.has(
-      `${api.method} ${api.host}${api.path}`,
-    );
-    const existing = existingContracts.get(key);
+    const upstreamId = api.upstreamId || '_default';
+    const key =
+      api.stubId ||
+      makeStubId({
+        upstreamId,
+        method: api.method,
+        path: api.path,
+      });
+    const legacyKey = apiKey(api);
+    const hasMock =
+      existingMockKeys.has(key) ||
+      existingMockKeys.has(legacyKey) ||
+      existingMockKeys.has(`${api.method} ${api.host}${api.path}`);
+    const existing = existingContracts.get(key) || existingContracts.get(legacyKey);
 
     const pathHit =
       relatedPaths.some((p) => api.path.includes(p)) ||
@@ -104,8 +114,18 @@ function classifyRequests(opts) {
 
     roles.push({
       apiKey: key,
+      id: key,
+      stubId: key,
+      upstreamId,
+      hosts: Array.isArray(api.hosts)
+        ? [...api.hosts]
+        : api.host && api.host !== '_default'
+          ? [api.host]
+          : [],
+      canonicalHost: api.canonicalHost || null,
+      hostVar: api.hostVar || null,
+      prefixKey: api.prefixKey || null,
       method: api.method,
-      host: api.host,
       path: api.path,
       relatedToTask: related,
       role,

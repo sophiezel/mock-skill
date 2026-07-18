@@ -34,6 +34,7 @@ const {
   buildReqCtxRe,
   resolveWrapperMethod,
 } = require('../lib/infer/http-wrappers');
+const { collapseByUpstream } = require('../lib/upstream');
 
 /**
  * Map legacy $HTTP verb → HTTP method (kept for tests / callers).
@@ -806,6 +807,8 @@ function extractLegacyApis(content, file, serviceBases, hostVars = new Map(), wr
       bodyHints: partial.bodyHints || [],
       responseHints: partial.responseHints || [],
       responseShape: null,
+      hostVar: partial.hostVar || null,
+      prefixKey: partial.prefixKey || null,
     });
   };
 
@@ -1116,14 +1119,26 @@ function dedupe(apis) {
     const host = a.host || '_default';
     // Skip hash-router / UI paths
     if ((a.path || '').includes('#/')) continue;
-    const key = `${a.method.toUpperCase()} ${host}${a.path}`;
+    // Prefer stubId when present (post-collapse); otherwise fall back to
+    // the legacy METHOD host+path key for raw extractor output.
+    const key = a.stubId || `${a.method.toUpperCase()} ${host}${a.path}`;
     if (!map.has(key)) {
       map.set(key, {
         ...a,
         host,
         evidences: [a.evidence].filter(Boolean),
-        exportHints: a.exportHint ? [a.exportHint] : [],
-        exportKeys: a.exportKey ? [a.exportKey] : [],
+        // Preserve exportHints from collapse; only rebuild from exportHint
+        // when no array is present (raw extractor output).
+        exportHints: a.exportHints?.length
+          ? [...a.exportHints]
+          : a.exportHint
+            ? [a.exportHint]
+            : [],
+        exportKeys: a.exportKeys?.length
+          ? [...a.exportKeys]
+          : a.exportKey
+            ? [a.exportKey]
+            : [],
       });
     } else {
       const cur = map.get(key);
@@ -1135,6 +1150,14 @@ function dedupe(apis) {
         cur.exportKeys.push(a.exportKey);
       }
       if (a.confidence === 'high') cur.confidence = 'high';
+      // Merge hosts[] when both carry upstream identity
+      if (a.hosts && cur.hosts) {
+        for (const h of a.hosts) {
+          if (!cur.hosts.includes(h)) cur.hosts.push(h);
+        }
+      }
+      // Keep richer responseShape
+      if (a.responseShape && !cur.responseShape) cur.responseShape = a.responseShape;
     }
   }
   let list = [...map.values()].map((a) => ({
@@ -1146,6 +1169,8 @@ function dedupe(apis) {
 
   // Drop _default twin when a real-host API already covers the same method+path
   // (path equal, or real path ends with the _default path — no project-specific segments).
+  // When stubId is present, collapseByUpstream already handled this; this guard
+  // covers raw extractor output that bypassed collapse.
   const qualified = list.filter((a) => a.host && a.host !== '_default');
   list = list.filter((a) => {
     if (a.host !== '_default') return true;
@@ -1307,7 +1332,8 @@ function inferApiUsage(projectDir, opts = {}) {
     }
   }
 
-  const deduped = dedupe(all);
+  const collapsed = collapseByUpstream(all);
+  const deduped = dedupe(collapsed);
   const filtered = deduped.filter(
     (a) => !isDeniedHost(a.host, inferCfg) && !isDeniedPath(a.path, inferCfg),
   );

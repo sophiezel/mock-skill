@@ -7,6 +7,8 @@ const {
   projectDataDir,
   contractPath,
   mockHandlerPath,
+  stubHandlerPath,
+  stubId: makeStubId,
   apiKey,
   pathDepth,
 } = require('../lib/paths');
@@ -16,6 +18,11 @@ const {
   shapeToDataFields,
   buildEnumCases,
 } = require('../lib/materialize');
+const {
+  normalizeHostLabel,
+  deriveUpstreamId,
+  pickCanonicalHost,
+} = require('../lib/upstream');
 
 function hintListToObject(hints) {
   if (!hints) return {};
@@ -114,7 +121,13 @@ function buildStandardCases(dataSample, enumCases = []) {
 }
 
 function buildContract(roleEntry, { taskId, source, resolution }) {
-  const id = apiKey(roleEntry);
+  const upstreamId = roleEntry.upstreamId || deriveUpstreamId({
+    hostVar: roleEntry.hostVar,
+    hosts: roleEntry.hosts || [roleEntry.host].filter(Boolean),
+  }) || '_default';
+  const hosts = roleEntry.hosts || (roleEntry.host && roleEntry.host !== '_default' ? [roleEntry.host] : []);
+  const canonicalHost = roleEntry.canonicalHost || (hosts.length ? pickCanonicalHost(hosts, upstreamId) : null);
+  const id = roleEntry.stubId || makeStubId({ upstreamId, method: roleEntry.method, path: roleEntry.path });
   const now = new Date().toISOString();
   const historyEntry = {
     taskId: taskId || null,
@@ -153,8 +166,11 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
 
   return {
     id,
+    stubId: id,
+    upstreamId,
+    hosts,
+    canonicalHost,
     method: [roleEntry.method || 'GET'],
-    host: roleEntry.host || '_default',
     path: roleEntry.path,
     source: source || 'usage',
     role: roleEntry.role,
@@ -461,8 +477,11 @@ function rmEmptyParents(startDir, stopDir) {
 
 /**
  * After --force generate: delete handlers/contracts not in this round's whitelist
- * and without mock-skill:manual. Handlers whitelist = proxy-rules; contracts =
- * all apiKeys written this round (including contract-only skips).
+ * and without mock-skill:manual. Handlers whitelist = stubIds; contracts =
+ * all stubIds written this round (including contract-only skips).
+ *
+ * Walks the new upstream catalog layout (mocks/<up>/<METHOD>/<path>/index.js)
+ * and also cleans up old FQDN-based directories.
  */
 function pruneOrphanArtifacts(projectSlug, { keepHandlerKeys, keepContractKeys }) {
   const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
@@ -474,21 +493,16 @@ function pruneOrphanArtifacts(projectSlug, { keepHandlerKeys, keepContractKeys }
     keepContractKeys instanceof Set ? keepContractKeys : new Set(keepContractKeys || []);
 
   if (fs.existsSync(mocksRoot)) {
-    function walkMocks(dir, host, parts) {
+    function walkMocks(dir, parts) {
       for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, ent.name);
         if (ent.isDirectory()) {
-          walkMocks(full, host, [...parts, ent.name]);
+          walkMocks(full, [...parts, ent.name]);
         } else if (ent.name === 'index.js') {
-          const p = '/' + parts.join('/');
-          const candidates = [
-            `GET ${host}${p}`,
-            `POST ${host}${p}`,
-            `PUT ${host}${p}`,
-            `DELETE ${host}${p}`,
-            `PATCH ${host}${p}`,
-          ];
-          if (candidates.some((k) => handlerKeep.has(k))) continue;
+          // Reconstruct stubId from path: parts = [upstreamId, METHOD, ...pathSegs]
+          // For old FQDN layout: parts = [host, ...pathSegs] (no METHOD segment)
+          const stubIdCandidates = reconstructStubIds(parts);
+          if (stubIdCandidates.some((k) => handlerKeep.has(k))) continue;
           let content = '';
           try {
             content = fs.readFileSync(full, 'utf8');
@@ -502,9 +516,9 @@ function pruneOrphanArtifacts(projectSlug, { keepHandlerKeys, keepContractKeys }
         }
       }
     }
-    for (const hostEnt of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
-      if (!hostEnt.isDirectory()) continue;
-      walkMocks(path.join(mocksRoot, hostEnt.name), hostEnt.name, []);
+    for (const ent of fs.readdirSync(mocksRoot, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      walkMocks(path.join(mocksRoot, ent.name), [ent.name]);
     }
   }
 
@@ -518,30 +532,36 @@ function pruneOrphanArtifacts(projectSlug, { keepHandlerKeys, keepContractKeys }
       } catch {
         continue;
       }
-      const id = c.id || apiKey(c);
+      const id = c.id || c.stubId || apiKey(c);
       if (contractKeep.has(id)) continue;
       if (c.manual === true || c['mock-skill:manual'] === true) continue;
-      // Preserve contracts that still have a manual handler on disk
-      const handlerFile = mockHandlerPath(
-        projectSlug,
-        c.host || '_default',
-        c.path || '/',
-      );
-      if (fs.existsSync(handlerFile)) {
-        try {
-          if (fs.readFileSync(handlerFile, 'utf8').includes('mock-skill:manual')) {
-            continue;
-          }
-        } catch {
-          /* ignore */
-        }
-      }
       fs.unlinkSync(full);
       prunedContracts++;
     }
   }
 
   return { prunedHandlers, prunedContracts };
+}
+
+/**
+ * Reconstruct possible stubIds from path parts.
+ * New layout: [upstreamId, METHOD, ...pathSegs] → METHOD upstreamId/path
+ * Old layout: [host, ...pathSegs] → METHOD host/path (for each METHOD)
+ */
+function reconstructStubIds(parts) {
+  if (parts.length >= 2) {
+    // New layout: parts[1] is METHOD (GET/POST/PUT/PATCH/DELETE)
+    const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+    if (methods.includes(parts[1])) {
+      const up = parts[0];
+      const p = '/' + parts.slice(2).join('/');
+      return [`${parts[1]} ${up}${p}`];
+    }
+  }
+  // Old layout: parts[0] is host, rest is path
+  const host = parts[0] || '_default';
+  const p = '/' + parts.slice(1).join('/');
+  return ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => `${m} ${host}${p}`);
 }
 
 function generateMocks({
@@ -629,7 +649,13 @@ function generateMocks({
   });
 
   for (const roleEntry of filteredRoles) {
-    const key = apiKey(roleEntry);
+    const upstreamId = roleEntry.upstreamId || deriveUpstreamId({
+      hostVar: roleEntry.hostVar,
+      hosts: roleEntry.hosts || [roleEntry.host].filter(Boolean),
+    }) || '_default';
+    const hosts = roleEntry.hosts || (roleEntry.host && roleEntry.host !== '_default' ? [roleEntry.host] : []);
+    const canonicalHost = roleEntry.canonicalHost || (hosts.length ? pickCanonicalHost(hosts, upstreamId) : null);
+    const key = roleEntry.stubId || makeStubId({ upstreamId, method: roleEntry.method, path: roleEntry.path });
 
     if (roleEntry.role === 'new' && roleEntry.blocked) {
       blocked.push(key);
@@ -641,9 +667,10 @@ function generateMocks({
       continue;
     }
 
-    const handlerFile = mockHandlerPath(
+    const handlerFile = stubHandlerPath(
       projectSlug,
-      roleEntry.host || '_default',
+      upstreamId,
+      roleEntry.method || 'GET',
       roleEntry.path,
     );
     const hasHandler = fs.existsSync(handlerFile);
@@ -675,7 +702,10 @@ function generateMocks({
       if (!isEmptyContractOnly(contract)) {
         rules.push({
           id: key,
-          host: roleEntry.host === '_default' ? '*' : roleEntry.host,
+          stubId: key,
+          upstreamId,
+          hosts: hosts.length ? hosts : (upstreamId === '_default' ? undefined : undefined),
+          host: upstreamId === '_default' ? '*' : undefined,
           pathPrefix: roleEntry.path,
           methods: [roleEntry.method || 'GET'],
         });
@@ -731,7 +761,10 @@ function generateMocks({
 
     rules.push({
       id: key,
-      host: roleEntry.host === '_default' ? '*' : roleEntry.host,
+      stubId: key,
+      upstreamId,
+      hosts: hosts.length ? hosts : undefined,
+      host: upstreamId === '_default' ? '*' : undefined,
       pathPrefix: roleEntry.path,
       methods: contract.method || [roleEntry.method || 'GET'],
     });
@@ -747,6 +780,25 @@ function generateMocks({
 
   const rulesPath = path.join(projectDataDir(projectSlug), 'proxy-rules.json');
   fs.writeFileSync(rulesPath, `${JSON.stringify(rules, null, 2)}\n`);
+
+  // Write upstreams.json from this round's roles
+  const upstreamsMap = {};
+  for (const roleEntry of filteredRoles) {
+    const up = roleEntry.upstreamId || deriveUpstreamId({
+      hostVar: roleEntry.hostVar,
+      hosts: roleEntry.hosts || [roleEntry.host].filter(Boolean),
+    }) || '_default';
+    const h = roleEntry.hosts || (roleEntry.host && roleEntry.host !== '_default' ? [roleEntry.host] : []);
+    const ch = roleEntry.canonicalHost || (h.length ? pickCanonicalHost(h, up) : null);
+    if (!upstreamsMap[up] || (h.length > upstreamsMap[up].hosts.length)) {
+      upstreamsMap[up] = { hosts: h, canonicalHost: ch };
+    }
+  }
+  const upstreamsPath = path.join(projectDataDir(projectSlug), 'upstreams.json');
+  fs.writeFileSync(
+    upstreamsPath,
+    `${JSON.stringify({ version: 1, upstreams: upstreamsMap }, null, 2)}\n`,
+  );
 
   if (force) {
     const keepHandlerKeys = new Set(rules.map((r) => r.id));
