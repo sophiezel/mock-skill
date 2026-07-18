@@ -47,9 +47,38 @@
 | **usageBacked** | 静态倒推出非空 `success.data`（含已知数组 payload `[]` / item 占位；含多 host 副本） |
 | **emptyData** | `materialize` 后无可用 data（静态缺口；**含多环境 host 膨胀**） |
 | **usageBackedHints / emptyDataHints** | 按 `exportHint` 去重，更接近「多少接口函数」有/无字段 |
-| **gaps** | usage-io 缺口（如 `no_export_symbol` / `no_callsite`） |
+| **gaps** | usage-io 缺口（见下表 Gap 分类学） |
 | **skippedEmpty** | `response.source===empty` 且 `no_export_symbol` → 只写 contract、不渲 handler |
 | **pruned*** | `--force` 时按白名单删除无 `mock-skill:manual` 的孤儿 |
+
+### Gap 分类学（产品真源，框架无关）
+
+缺口按「失败层」分类，与域名 / stub catalog 正交。完整定义见 [`lib/gap-taxonomy.js`](../lib/gap-taxonomy.js)。
+
+| Gap | 层 | 可静态救？ | 产品处置 |
+|-----|-----|------------|----------|
+| `no_export_symbol` | discover | 部分（更好 bind） | contract-only |
+| `no_callsite` | bind | 否（无用法） | contract-only（拟） |
+| `bind_ambiguous` | bind | 是（exportKey / alias） | 加强绑定 |
+| `TRACE_EMPTY` | trace | 部分（扩展 BindingGraph） | 增强 trace 或 capture |
+| `no_property_access` | trace | 同 TRACE_EMPTY | 同上 |
+| `props_shallow_only` | trace | 是（跨文件 drill） | BindingGraph 边 |
+| `dynamic_key` | trace | 基本否 | capture / OpenAPI |
+
+根因不是「某仓特殊性」或「AST 没做」，而是 **静态可判定性边界** + **产品禁止臆造字段**：跨文件 props 下传、配置驱动 UI（`columns.dataIndex`）、动态 key、死导出 —— 静态不可解或不可判定。真值永远走 capture-merge / OpenAPI。
+
+### 保真度阶梯（fidelity）
+
+每个 stub 在 contract 与报告中标注 `fidelity`，引导用户升阶（不臆造）：
+
+| 级 | 含义 | 升阶动作 |
+|----|------|----------|
+| **L0** | 空信封：无 shape，`data={}` | `capture-merge` 或 `import-openapi` 补 shape |
+| **L1** | usage/OpenAPI shape + 占位值 | `session` + `capture-merge` 换真值 |
+| **L2** | 已 capture 真实 body（`source=usage+capture`） | 可选：`set-case` 加场景 |
+| **L3** | 场景 / 有状态（预留，暂不自动判定） | — |
+
+报告 `coverage-summary.json` 含 `fidelity: {L0,L1,L2,L3}` 与 `gapsByType`、`emptyStubsByGap`、`deadExports`。
 
 ### 扫描过滤
 

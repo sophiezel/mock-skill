@@ -23,6 +23,7 @@ const {
   deriveUpstreamId,
   pickCanonicalHost,
 } = require('../lib/upstream');
+const { classifyFidelity } = require('../lib/gap-taxonomy');
 
 function hintListToObject(hints) {
   if (!hints) return {};
@@ -193,11 +194,15 @@ function buildContract(roleEntry, { taskId, source, resolution }) {
       successCode: 0,
       dataFields: shapeToDataFields(shape),
       bizCodes: [],
-      source: hasData ? 'usage' : 'empty',
+      source: hasData ? (source && source.includes('openapi') ? 'openapi' : 'usage') : 'empty',
       shape,
     },
     cases,
     coverage,
+    fidelity: classifyFidelity({
+      response: { source: hasData ? 'usage' : 'empty', shape },
+      coverage,
+    }),
     evidences: roleEntry.evidences || [],
     exportHint: roleEntry.exportHint || null,
     exportKey: roleEntry.exportKey || null,
@@ -251,6 +256,16 @@ function mergeContract(existing, next, { taskId, overwriteCapture = false } = {}
 
   if (isCaptureBacked(existing) && !overwriteCapture) {
     const cases = mergeCasesPreserveCapture(existing.cases, next.cases);
+    const response = {
+      ...next.response,
+      ...existing.response,
+      source: existing.response.source,
+      dataFields: {
+        ...(next.response?.dataFields || {}),
+        ...(existing.response?.dataFields || {}),
+      },
+      shape: existing.response?.shape || next.response?.shape,
+    };
     return {
       ...existing,
       ...next,
@@ -267,18 +282,10 @@ function mergeContract(existing, next, { taskId, overwriteCapture = false } = {}
         },
         headers: next.request?.headers || existing.request?.headers || [],
       },
-      response: {
-        ...next.response,
-        ...existing.response,
-        source: existing.response.source,
-        dataFields: {
-          ...(next.response?.dataFields || {}),
-          ...(existing.response?.dataFields || {}),
-        },
-        shape: existing.response?.shape || next.response?.shape,
-      },
+      response,
       cases,
       coverage: next.coverage || existing.coverage,
+      fidelity: classifyFidelity({ response, coverage: next.coverage || existing.coverage }),
       evidences: [
         ...new Set([
           ...(existing.evidences || []),
@@ -308,6 +315,17 @@ function mergeContract(existing, next, { taskId, overwriteCapture = false } = {}
       ? next.cases
       : mergeCasesPreserve(existing.cases, next.cases);
 
+  const response = {
+    ...existing.response,
+    ...next.response,
+    dataFields: {
+      ...(existing.response?.dataFields || {}),
+      ...(next.response?.dataFields || {}),
+    },
+    shape: nextRich
+      ? next.response?.shape
+      : existing.response?.shape || next.response?.shape,
+  };
   return {
     ...existing,
     ...next,
@@ -318,19 +336,10 @@ function mergeContract(existing, next, { taskId, overwriteCapture = false } = {}
       body: { ...(existing.request?.body || {}), ...(next.request?.body || {}) },
       headers: next.request?.headers || existing.request?.headers || [],
     },
-    response: {
-      ...existing.response,
-      ...next.response,
-      dataFields: {
-        ...(existing.response?.dataFields || {}),
-        ...(next.response?.dataFields || {}),
-      },
-      shape: nextRich
-        ? next.response?.shape
-        : existing.response?.shape || next.response?.shape,
-    },
+    response,
     cases,
     coverage: next.coverage || existing.coverage,
+    fidelity: classifyFidelity({ response, coverage: next.coverage || existing.coverage }),
     evidences: [
       ...new Set([...(existing.evidences || []), ...(next.evidences || [])]),
     ],
@@ -632,14 +641,20 @@ function generateMocks({
   }
 
   /**
-   * Empty shape + unbound export → contract only (no handler / proxy rule).
-   * Having exportHint (no no_export_symbol) still materializes empty data:{} handlers;
-   * real fields come from usage-io or capture-merge.
+   * Contract-only gate: empty shape + weak/discover gaps → write contract only,
+   * no handler, no proxy rule. Keeps the stub discoverable for capture-merge /
+   * import-openapi without polluting the proxy with dead/empty handlers.
+   *
+   * Triggers:
+   *  - no_export_symbol: URL found but no export bound (discover gap)
+   *  - no_callsite: export never called (dead export) — Phase 3 policy
+   * Both are gaps capture cannot create value for; TRACE_EMPTY keeps a handler
+   * (callsite exists → capture-merge can fill it).
    */
   function isEmptyContractOnly(contract) {
     if (contract.response?.source !== 'empty') return false;
     const gaps = contract.coverage?.gaps || [];
-    return gaps.includes('no_export_symbol');
+    return gaps.includes('no_export_symbol') || gaps.includes('no_callsite');
   }
 
   // Skip roles that are still gateway-only
@@ -683,7 +698,7 @@ function generateMocks({
       // Still refresh contract IO if usage-backed is richer
       let contract = buildContract(roleEntry, {
         taskId,
-        source: 'usage',
+        source: roleEntry.source || 'usage',
       });
       if (merge && existing.has(key)) {
         contract = applyExistingMerge(key, contract);
@@ -717,7 +732,7 @@ function generateMocks({
 
     let contract = buildContract(roleEntry, {
       taskId,
-      source: roleEntry.role === 'new' ? 'docs|manual' : 'usage',
+      source: roleEntry.source || (roleEntry.role === 'new' ? 'docs|manual' : 'usage'),
     });
     contract = applyExistingMerge(key, contract);
 

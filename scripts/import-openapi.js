@@ -2,7 +2,12 @@
 
 /**
  * OpenAPI / Swagger import → classify-compatible roles for generateMocks.
- * Usage: mock-skill import-openapi --from=./openapi.json [--task=ID]
+ * Usage: mock-skill import-openapi --from=./openapi.json|yaml [--task=ID]
+ *
+ * Phase 1.5:
+ *  - Derives stubId / upstreamId / hosts[] from the spec host (same model as init),
+ *    so OpenAPI stubs merge with usage-inferred stubs by stubId (OpenAPI ≥ usage).
+ *  - Supports YAML specs (js-yaml) in addition to JSON.
  */
 
 const fs = require('fs');
@@ -11,14 +16,40 @@ const {
   resolveProjectSlug,
   ensureProjectDirs,
   projectDataDir,
+  stubId: makeStubId,
 } = require('../lib/paths');
 const { appendAudit } = require('../lib/audit');
 const { writeClassifyResult } = require('./classify-requests');
 const { generateMocks } = require('./generate-mock');
 const { jsonSchemaToShape } = require('../lib/infer/shape-json-schema');
+const {
+  normalizeHostLabel,
+  deriveUpstreamId,
+  pickCanonicalHost,
+} = require('../lib/upstream');
 
 function schemaToShape(schema, components = {}) {
   return jsonSchemaToShape(schema, components);
+}
+
+function parseSpec(raw) {
+  // Try JSON first, then YAML (js-yaml). YAML is an optional capability;
+  // if js-yaml is unavailable, fall back to a clear error.
+  try {
+    return JSON.parse(raw);
+  } catch {
+    let yaml;
+    try {
+      yaml = require('js-yaml');
+    } catch {
+      throw new Error('OpenAPI YAML requires the `js-yaml` package; install it or convert to JSON');
+    }
+    try {
+      return yaml.load(raw);
+    } catch (e) {
+      throw new Error(`Failed to parse OpenAPI spec (tried JSON then YAML): ${e.message}`);
+    }
+  }
 }
 
 function extractHost(spec) {
@@ -45,12 +76,7 @@ function importOpenApi(opts = {}) {
   if (!fs.existsSync(abs)) throw new Error(`OpenAPI file not found: ${abs}`);
 
   const raw = fs.readFileSync(abs, 'utf8');
-  let spec;
-  try {
-    spec = JSON.parse(raw);
-  } catch {
-    throw new Error('OpenAPI YAML not supported in v1 — convert to JSON first');
-  }
+  const spec = parseSpec(raw);
 
   const projectDir = path.resolve(opts.projectDir || process.cwd());
   const projectSlug = resolveProjectSlug(projectDir, opts.name);
@@ -60,6 +86,13 @@ function importOpenApi(opts = {}) {
   const components = spec.components || spec.definitions || {};
   const paths = spec.paths || {};
   const roles = [];
+
+  // Derive upstream identity from the spec host (same model as init).
+  const upstreamId = host && host !== '_default'
+    ? (deriveUpstreamId({ hosts: [host] }) || normalizeHostLabel(host) || '_default')
+    : '_default';
+  const hosts = host && host !== '_default' ? [host] : [];
+  const canonicalHost = hosts.length ? pickCanonicalHost(hosts, upstreamId) : null;
 
   for (const [p, methods] of Object.entries(paths)) {
     if (!methods || typeof methods !== 'object') continue;
@@ -79,9 +112,14 @@ function importOpenApi(opts = {}) {
       // unwrap envelope data if present
       const rawShape = schemaToShape(schema, components);
       const shape = rawShape.props?.data ? rawShape.props.data : rawShape;
-      const apiKey = `${method.toUpperCase()} ${host}${fullPath}`;
+      const sid = makeStubId({ upstreamId, method: method.toUpperCase(), path: fullPath });
       roles.push({
-        apiKey,
+        apiKey: sid,
+        id: sid,
+        stubId: sid,
+        upstreamId,
+        hosts: [...hosts],
+        canonicalHost,
         method: method.toUpperCase(),
         host,
         path: fullPath,
@@ -146,7 +184,7 @@ function importOpenApi(opts = {}) {
   return { roles, gen, projectSlug };
 }
 
-module.exports = { importOpenApi, schemaToShape, extractHost };
+module.exports = { importOpenApi, schemaToShape, extractHost, parseSpec };
 
 if (require.main === module) {
   const from = process.argv.find((a) => a.startsWith('--from='))?.slice(7);

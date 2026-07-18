@@ -1,0 +1,5 @@
+{
+  "httpWrappers": [
+    { "callee": "$HTTP", "methods": { "getP": "GET", "postP": "POST" } }
+  ]
+}

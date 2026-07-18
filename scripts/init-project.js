@@ -8,6 +8,7 @@ const {
   projectDataDir,
 } = require('../lib/paths');
 const { appendAudit } = require('../lib/audit');
+const { buildInitReport } = require('../lib/init-report');
 const { inferApiUsage } = require('./infer-api-usage');
 const { classifyRequests, writeClassifyResult } = require('./classify-requests');
 const {
@@ -129,142 +130,28 @@ async function initProject(opts = {}) {
     reportName,
   );
 
-  const gapLines = (gen.gapApis || [])
-    .slice(0, 40)
-    .map((g) => `- \`${g.id}\`: ${g.gaps.join(', ')}`);
-
-  // Stub-level metrics (post-collapse)
-  const stubSet = new Set();
-  const upstreamSet = new Set();
-  let multiHostStubs = 0;
-  let emptyStubs = 0;
-  const emptyStubIds = [];
-  for (const a of apiList) {
-    const sid = a.stubId || a.id;
-    if (!stubSet.has(sid)) {
-      stubSet.add(sid);
-      if (a.upstreamId) upstreamSet.add(a.upstreamId);
-      if (a.hosts?.length >= 2) multiHostStubs++;
-      const src = a.responseShape || {};
-      const isEmpty = !src.props || (src.type === 'object' && Object.keys(src.props).length === 0);
-      if (isEmpty) {
-        emptyStubs++;
-        emptyStubIds.push(sid);
-      }
-    }
-  }
-  const stubsTotal = stubSet.size;
-  const upstreamsTotal = upstreamSet.size;
-
-  const md = [
-    '# mock-skill init report',
-    '',
-    `- projectDir: \`${projectDir}\``,
-    `- projectSlug: \`${projectSlug}\``,
-    `- taskId: \`${taskId || 'adhoc'}\``,
-    `- discovered: ${apiList.length}`,
-    `- stubsTotal: ${stubsTotal}`,
-    `- upstreamsTotal: ${upstreamsTotal}`,
-    `- multiHostStubs: ${multiHostStubs}`,
-    `- emptyStubs: ${emptyStubs}`,
-    `- generated: ${gen.generated}`,
-    `- reused: ${gen.reused}`,
-    `- skipped: ${gen.skipped}`,
-    `- blocked: ${gen.blocked.length}`,
-    `- removedGatewayOnly: ${gen.removedGateway || 0}`,
-    `- usageBackedCount: ${gen.usageBackedCount || 0}`,
-    `- emptyDataCount: ${gen.emptyDataCount || 0}`,
-    `- usageBackedHints: ${gen.usageBackedHints || 0}`,
-    `- emptyDataHints: ${gen.emptyDataHints || 0}`,
-    `- skippedEmptyCount: ${gen.skippedEmptyCount || 0}`,
-    `- prunedHandlers: ${gen.prunedHandlers || 0}`,
-    `- prunedContracts: ${gen.prunedContracts || 0}`,
-    `- enumBackedCount: ${gen.enumBackedCount || 0}`,
-    `- TRACE_EMPTY: ${gen.traceEmptyCount || 0}`,
-    `- bind_ambiguous: ${gen.bindAmbiguousCount || 0}`,
-    `- capturePreserved: ${gen.capturePreservedCount || 0}`,
-    `- gatewayFilteredRoles: ${gen.gatewayFilteredRoles || 0}`,
-    '',
-    '## Stub catalog',
-    '',
-    `- **stubsTotal**: ${stubsTotal} unique stubs (METHOD + upstreamId + path), collapsed from ${apiList.length} API rows.`,
-    `- **upstreamsTotal**: ${upstreamsTotal} unique upstream service identities.`,
-    `- **multiHostStubs**: ${multiHostStubs} stubs with multiple environment hosts (matched via hosts[]).`,
-    `- **emptyStubs**: ${emptyStubs} stubs with no response shape — candidates for capture-merge.`,
-    '',
-    '## Coverage note',
-    '',
-    '- **stubsTotal / upstreamsTotal**: post-collapse counts. One stub = one logical API; multi-env hosts are matchers, not duplicates.',
-    '- **emptyStubs**: stubs with empty `responseShape`. These are generated as contract-only (no handler) when `no_export_symbol` gap exists. Run `mock-skill capture-merge` to fill them with real response data.',
-    '- **multiHostStubs**: stubs that match multiple environment hosts (e.g., prod + stage). The proxy matches any host in `hosts[]` to the same stub.',
-    '- **emptyData**：`success.data` 无字段（静态用法倒推未抽出 props）。',
-    '- **usageBackedHints / emptyDataHints**：按 `exportHint` 去重后的接口函数数。',
-    '- **gaps**：静态分析声明的缺口（如 `no_export_symbol` / `no_callsite` / `TRACE_EMPTY` / `bind_ambiguous`）。',
-    '- **TRACE_EMPTY**：有调用点但响应 shape 仍空——分层 trace 失败，不是「生成成功」。',
-    '- **skippedEmpty**：`response.source===empty` 且 gaps 含 `no_export_symbol` → 只写 contract、不渲空 handler、不进 proxy-rules。',
-    '- **prunedHandlers / prunedContracts**：`--force` 时删除不在本轮白名单且无 `mock-skill:manual` 的孤儿产物；**默认不擦除** `usage+capture` 真值。',
-    '- **capture-merge**：显式命令，写入真实响应并以 capture 数据为准（`response.source=usage+capture`）。不是补洞/自动兜底。',
-    '- **覆盖矩阵**：普通 `init`/`generate` 保留已有 capture；仅 `--overwrite-capture` 允许 usage/jsf 盖掉 capture；裸 `--force` 不擦 capture。',
-    '- 噪音过滤：跳过 `e2e/`、`*.spec.*`、`src/mock/`；pathLiteral 需 request 上下文。',
-    '- 项目差异：`<project>/.mock-skill/infer.json` 可覆盖 pathAliases / httpWrappers（合并 `config/default.infer.json`）。',
-    '',
-    '## Roles summary',
-    '',
-    ...['new', 'modify', 'dependency', 'unrelated'].map((role) => {
-      const n = roles.filter((r) => r.role === role).length;
-      return `- ${role}: ${n}`;
-    }),
-    '',
-    gapLines.length
-      ? `## gapApis (sample)\n\n${gapLines.join('\n')}\n`
-      : '',
-    emptyStubIds.length
-      ? `## Empty stubs (candidates for capture-merge)\n\n${emptyStubIds.slice(0, 50).map((id) => `- \`${id}\``).join('\n')}\n`
-      : '',
-    '## Next',
-    '',
-    '```bash',
-    `mock-skill session start --name=${projectSlug}${taskId ? ` --task=${taskId}` : ''}`,
-    '# after browsing main flows:',
-    `mock-skill capture-merge --name=${projectSlug}`,
-    '```',
-    '',
-  ].join('\n');
+  const { md, summary } = buildInitReport({
+    apiList, gen, roles,
+    projectDir, projectSlug, taskId,
+    existingContracts,
+  });
+  const {
+    stubsTotal,
+    upstreamsTotal,
+    multiHostStubs,
+    emptyStubs,
+  } = summary;
 
   fs.writeFileSync(reportPath, md);
   fs.writeFileSync(
     path.join(projectDataDir(projectSlug), 'reports', 'coverage-summary.json'),
-    `${JSON.stringify(
-      {
-        discovered: apiList.length,
-        stubsTotal,
-        upstreamsTotal,
-        multiHostStubs,
-        emptyStubs,
-        emptyStubIds,
-        usageBackedCount: gen.usageBackedCount,
-        emptyDataCount: gen.emptyDataCount,
-        usageBackedHints: gen.usageBackedHints,
-        emptyDataHints: gen.emptyDataHints,
-        skippedEmptyCount: gen.skippedEmptyCount,
-        prunedHandlers: gen.prunedHandlers || 0,
-        prunedContracts: gen.prunedContracts || 0,
-        enumBackedCount: gen.enumBackedCount,
-        traceEmptyCount: gen.traceEmptyCount || 0,
-        bindAmbiguousCount: gen.bindAmbiguousCount || 0,
-        capturePreservedCount: gen.capturePreservedCount || 0,
-        gapApis: gen.gapApis,
-        removedGateway: gen.removedGateway,
-      },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify(summary, null, 2)}\n`,
   );
 
   appendAudit(projectSlug, {
     command: 'init',
     taskId,
-    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0}`,
+    summary: `discovered=${apiList.length} generated=${gen.generated} usageBacked=${gen.usageBackedCount} empty=${gen.emptyDataCount} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} fidelity=L0:${summary.fidelity.L0}/L1:${summary.fidelity.L1}/L2:${summary.fidelity.L2}/L3:${summary.fidelity.L3}`,
     reportPath,
   });
 
@@ -273,7 +160,7 @@ async function initProject(opts = {}) {
     console.log(`[mock-skill] scenarios copied: ${copiedScenarios.map((f) => f.replace(/\.json$/, '')).join(', ')}`);
   }
   console.log(
-    `[mock-skill] done stubs=${stubsTotal} upstreams=${upstreamsTotal} multiHost=${multiHostStubs} empty=${emptyStubs} generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
+    `[mock-skill] done stubs=${stubsTotal} upstreams=${upstreamsTotal} multiHost=${multiHostStubs} empty=${emptyStubs} fidelity=L0:${summary.fidelity.L0}/L1:${summary.fidelity.L1}/L2:${summary.fidelity.L2}/L3:${summary.fidelity.L3} generated=${gen.generated} usageBacked=${gen.usageBackedCount} emptyData=${gen.emptyDataCount} usageBackedHints=${gen.usageBackedHints || 0} emptyDataHints=${gen.emptyDataHints || 0} TRACE_EMPTY=${gen.traceEmptyCount || 0} capturePreserved=${gen.capturePreservedCount || 0} skippedEmpty=${gen.skippedEmptyCount || 0} prunedHandlers=${gen.prunedHandlers || 0} prunedContracts=${gen.prunedContracts || 0} gaps=${(gen.gapApis || []).length}`,
   );
 
   if (strictUsage && (gen.traceEmptyCount || 0) > 0) {

@@ -44,8 +44,9 @@ Usage:
   mock-skill set-scenario <name> [--name=slug]
   mock-skill smoke [--name=slug] [--ci] [--cases=...] [--scenario=NAME]
   mock-skill audit [--task=ID] [--api=host/path]
-  mock-skill capture-merge [--name=slug] [--task=ID]
-  mock-skill import-openapi --from=<spec.json> [--task=ID] [--force]
+  mock-skill capture-merge [--name=slug] [--task=ID] [--no-sanitize] [--sensitive-paths=k1,k2]
+  mock-skill list-empty [--name=slug] [--gap=GAP] [--all]
+  mock-skill import-openapi --from=<spec.json|yaml> [--task=ID] [--force] [--name=slug]
   mock-skill export-msw [--out=path] [--name=slug]
   mock-skill install | uninstall
 
@@ -249,7 +250,40 @@ async function main() {
     const { resolveProjectSlug } = require('../lib/paths');
     const { captureMerge } = require('../scripts/capture-merge');
     const projectSlug = resolveProjectSlug(process.cwd(), f.name);
-    captureMerge(projectSlug, { taskId: f.task || null });
+    captureMerge(projectSlug, {
+      taskId: f.task || null,
+      sanitize: f.sanitize !== false,
+      sensitivePaths: f['sensitive-paths']
+        ? String(f['sensitive-paths']).split(',').map((s) => s.trim()).filter(Boolean)
+        : [],
+    });
+    return;
+  }
+
+  if (cmd === 'list-empty') {
+    const { resolveProjectSlug } = require('../lib/paths');
+    const { listEmptyStubs, listByFidelity } = require('../lib/list-empty');
+    const projectSlug = resolveProjectSlug(process.cwd(), f.name);
+    if (f.all) {
+      const grouped = listByFidelity(projectSlug);
+      for (const lvl of ['L0', 'L1', 'L2', 'L3']) {
+        console.log(`## ${lvl} (${grouped[lvl].length})`);
+        for (const r of grouped[lvl]) {
+          console.log(`- ${r.stubId}${r.gaps.length ? ` — ${r.gaps.join(',')}` : ''}`);
+        }
+      }
+      return;
+    }
+    const rows = listEmptyStubs(projectSlug, { gap: f.gap || null });
+    if (!rows.length) {
+      console.log('[mock-skill] no empty stubs — all stubs have shape or capture');
+      return;
+    }
+    console.log(`[mock-skill] ${rows.length} empty stub(s) needing capture-merge / import-openapi:`);
+    for (const r of rows) {
+      console.log(`- ${r.stubId} [${r.fidelity}]${r.gaps.length ? ` gaps=${r.gaps.join(',')}` : ''}${r.exportHint ? ` export=${r.exportHint}` : ''}`);
+      console.log(`    upgrade: ${r.upgradeHint}`);
+    }
     return;
   }
 

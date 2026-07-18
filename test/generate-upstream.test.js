@@ -170,3 +170,32 @@ test('contract schema includes stubId, upstreamId, hosts, canonicalHost', () => 
     assert.ok(!contract.host || contract.host === undefined, 'no top-level host field');
   });
 });
+
+test('contract schema stamps fidelity (L1 for usage shape, L0 for empty)', () => {
+  withTempProject((slug) => {
+    const shapeRole = makeRole();
+    const emptyRole = {
+      ...makeRole(),
+      stubId: 'GET svc-a/v1/empty',
+      path: '/v1/empty',
+      responseShape: { type: 'object', props: {} },
+      coverage: { gaps: ['TRACE_EMPTY'], request: {}, response: {} },
+    };
+    generateMocks({
+      projectSlug: slug,
+      roles: [shapeRole, emptyRole],
+      force: true,
+      merge: false,
+    });
+
+    const shapeContract = JSON.parse(
+      fs.readFileSync(contractPath(slug, 'GET svc-a/v1/items'), 'utf8'),
+    );
+    assert.equal(shapeContract.fidelity, 'L1', 'usage-backed shape → L1');
+
+    const emptyContract = JSON.parse(
+      fs.readFileSync(contractPath(slug, 'GET svc-a/v1/empty'), 'utf8'),
+    );
+    assert.equal(emptyContract.fidelity, 'L0', 'empty shape → L0');
+  });
+});

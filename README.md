@@ -95,6 +95,53 @@ upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
 
 **通用性约束**：本工具不含任何业务仓硬编码、不依赖特定公司域名或内部服务名。同一份代码可 `init` 任意前端项目。
 
+### 保真度阶梯（fidelity）与最短路径
+
+每个 stub 标注 `fidelity`（contract 字段 + init 报告 `coverage-summary.json`）：
+
+| 级 | 含义 | 升阶动作 |
+|----|------|----------|
+| **L0** | 空信封：无 shape，`data={}` | `capture-merge` 或 `import-openapi` 补 shape |
+| **L1** | usage/OpenAPI shape + 占位值 | `session` + `capture-merge` 换真值 |
+| **L2** | 已 capture 真实 body（`source=usage+capture`） | 可选 `set-case` 加场景 |
+| **L3** | 场景 / 有状态（预留） | — |
+
+**最短路径（任意项目，无业务仓依赖）**：
+
+```bash
+cd /path/to/any-frontend-app
+mock-skill init --name=<slug>                      # 生成 stubs；报告显示 fidelity L0/L1 分布
+mock-skill list-empty --name=<slug>                # 列出待填充的空 stub（可 --gap=TRACE_EMPTY 过滤）
+mock-skill session start --name=<slug>             # 打开带代理的【Mock 自测浏览器】，浏览主流程
+mock-skill capture-merge --name=<slug>             # 以真实捕获填充 stubs，自动清 TRACE_EMPTY/no_callsite，标 L2
+mock-skill list-empty --name=<slug>                 # 复查：剩余空 stub 应只剩真正无用法的死导出
+```
+
+- `capture-merge` 默认开启 **最小 PII/Token 脱敏**（`authorization` / `token` / `password` / `cookie` 等键，子串匹配，递归 header+body）；`--no-sanitize` 关闭，`--sensitive-paths=k1,k2` 追加。
+- `list-empty --all` 按 L0/L1/L2/L3 分组打印全部 stub；`--gap=<GAP>` 按 gap 类型过滤（见 [`references/infer-from-usage.md`](./references/infer-from-usage.md) Gap 分类学）。
+- 录制路径按 slug 隔离：`.data/projects/<slug>/captures/`，`--name` 可任意命名（不绑定本机业务仓路径）。
+
+### Shape 通道：声明式 UI 字段 + 跨文件 props-drill
+
+静态推断按「缺口层」扩展，**有界**（不做全程序分析，不臆造字段）：
+
+- **DeclarativeFieldSource plugin**：抽象 `columns[].dataIndex` / `fieldNames` 等「配置驱动 UI」字段提取，**按 JSX 属性名匹配，不绑定组件库符号**。内置 `table-columns-dataIndex`、`select-fieldNames`；项目可在 `.mock-skill/infer.json` 声明自定义模式：
+
+  ```json
+  {
+    "declarativeFieldSources": [
+      { "name": "proj-datagrid", "dataSourceProp": "rows", "columnsProp": "fields", "fieldKey": "key" }
+    ]
+  }
+  ```
+
+  任意组件（`DataGrid` / `DataList` / 自研列表）只要暴露对应属性名即可被识别，无需改引擎代码。
+
+- **一层跨文件 props-drill**：父组件 `<Child detail={payload} />` 传整对象给子组件、子组件读 `detail.name` 时，自动把子组件参数上的 `param.field` 回连到父响应 shape（仅一层，不做 store / 全程序分析）。超出此边界 → 标 `TRACE_EMPTY` / `props_shallow_only`，导向 `capture-merge` / `import-openapi`。
+- **路径参数化**：`${hostVar}/users/${id}` 这类「hostVar 前缀 + 尾部动态段」模板会被参数化为 `/users/:id`（不再整条丢弃）。
+
+**纪律**：Shape 通道永不发明键；真值永远走 capture / OpenAPI。多环境共享由 stub catalog 保证。
+
 ## 自测 Session
 
 ```bash
@@ -157,7 +204,7 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 | 命令 | 作用 |
 |------|------|
 | `mock-skill init [--adapter=] [--force] [--overwrite-capture] [--strict-usage]` | 全量扫描并预生成 mock |
-| `mock-skill import-openapi --from=` | 从 OpenAPI JSON 生成 contracts/handlers |
+| `mock-skill import-openapi --from=<spec.json\|yaml>` | 从 OpenAPI JSON/YAML 生成 contracts/handlers（按 stubId 与 usage 合并，OpenAPI ≥ usage） |
 | `mock-skill export-msw` | 导出 MSW handlers 供单测 |
 | `mock-skill classify` | 分类 |
 | `mock-skill generate [--force] [--overwrite-capture]` | 按分类结果生成（默认可保 capture） |
@@ -166,7 +213,8 @@ mock-skill set-scenario e2e-fault     # 批量切多接口
 | `mock-skill set-scenario` | 批量切换场景 |
 | `mock-skill smoke [--ci] [--scenario=]` | 冒烟（CI 非零退出；默认跳过 timeout/offline） |
 | `mock-skill audit --task=` | 追因 |
-| `mock-skill capture-merge` | 以真实捕获覆盖对应接口 success 数据 |
+| `mock-skill capture-merge [--no-sanitize] [--sensitive-paths=]` | 以真实捕获覆盖对应接口 success 数据（默认脱敏 PII/Token） |
+| `mock-skill list-empty [--gap=] [--all]` | 列出空/低保真度 stub，按 gap 类型过滤或按 L0/L1/L2/L3 分组 |
 
 **init / generate 常用 flags：**
 

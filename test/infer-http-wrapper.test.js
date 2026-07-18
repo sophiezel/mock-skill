@@ -140,13 +140,15 @@ export function openWeb() {
   );
 });
 
-test('infer: path with unresolved ${id} is dropped', () => {
+test('infer: path with ${id} segment is parametrized to :id (not dropped)', () => {
   withTempProject({ 'src/service/index.js': SERVICE_SRC }, (root) => {
     const apis = inferApiUsage(root, { withUsageIo: false, forceRefresh: true });
-    assert.ok(
-      !apis.some((a) => /\/users\//.test(a.path)),
-      apis.filter((a) => /users/.test(a.path)).map((a) => a.path).join(','),
-    );
+    // `${apiPrefix}/users/${id}` is now discovered as /users/:id (parametrized),
+    // not dropped. This is a bounded discover enhancement: a leading hostVar
+    // Identifier plus trailing Identifier interpolations become :param placeholders.
+    const hit = apis.find((a) => /\/users\/:id$/.test(a.path));
+    assert.ok(hit, apis.filter((a) => /users/.test(a.path)).map((a) => a.path).join(','));
+    assert.equal(hit.method, 'GET');
   });
 });
 

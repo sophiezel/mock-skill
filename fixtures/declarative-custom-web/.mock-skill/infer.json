@@ -1,0 +1,13 @@
+{
+  "httpWrappers": [
+    { "callee": "$HTTP", "methods": { "getP": "GET", "postP": "POST" } }
+  ],
+  "declarativeFieldSources": [
+    {
+      "name": "datalist-key",
+      "dataSourceProp": "rows",
+      "columnsProp": "fields",
+      "fieldKey": "key"
+    }
+  ]
+}

@@ -1038,6 +1038,24 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
         applyScriptBindingGraph,
         applyTemplateEvents,
       } = require('../lib/infer/script-binding');
+      // Resolve an imported component name to its ts-morph SourceFile for
+      // the bounded one-layer cross-file props-drill (Pass 5).
+      const resolveComponentFile = (componentName) => {
+        try {
+          for (const imp of sf.getImportDeclarations()) {
+            const named = imp.getNamedImports?.() || [];
+            const matchesNamed = named.some((n) => n.getName?.() === componentName);
+            const defaultImp = imp.getDefaultImport?.();
+            const matchesDefault = !!defaultImp && defaultImp.getText?.() === componentName;
+            if (!matchesNamed && !matchesDefault) continue;
+            const target = imp.getModuleSpecifierSourceFile?.();
+            if (target) return target;
+          }
+        } catch {
+          /* ignore */
+        }
+        return null;
+      };
       const graph = applyScriptBindingGraph({
         sf,
         SyntaxKind,
@@ -1051,6 +1069,8 @@ function enrichApisWithUsageIo(projectDir, apis, opts = {}) {
         isUnderDataPath,
         shouldRejectEnvelopeField,
         registerReceiver,
+        fieldSources: inferCfg.declarativeFieldSources || [],
+        resolveComponentFile,
       });
       // L2 Vue template AST → same BindingGraph (when virtual script from .vue)
       const { vuePathFromVirtualScript } = require('../lib/vue-script');

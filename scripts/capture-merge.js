@@ -17,6 +17,8 @@ const { appendAudit } = require('../lib/audit');
 const { renderHandler, loadExistingContracts } = require('./generate-mock');
 const { isPlaceholderValue } = require('../lib/materialize');
 const { normalizeHostLabel } = require('../lib/upstream');
+const { classifyFidelity } = require('../lib/gap-taxonomy');
+const { sanitizeCapture } = require('../lib/sanitize-capture');
 
 function deepMergeShape(target, sample) {
   if (sample == null) return target;
@@ -205,6 +207,15 @@ function captureMerge(projectSlug, opts = {}) {
         continue;
       }
     }
+    // Minimal PII / token sanitization before persisting real bodies.
+    // Defaults cover industry-standard sensitive keys; opts.sensitivePaths extends.
+    if (opts.sanitize !== false) {
+      const sanitized = sanitizeCapture(
+        { responseBody: body, requestHeaders: cap.requestHeaders },
+        { sensitivePaths: opts.sensitivePaths || [] },
+      );
+      body = sanitized.responseBody;
+    }
     const data =
       body && typeof body === 'object' && 'data' in body ? body.data : body;
     if (data == null) continue;
@@ -222,6 +233,7 @@ function captureMerge(projectSlug, opts = {}) {
       contract.response.shape || { type: 'object', props: {} },
       data,
     );
+    contract.fidelity = classifyFidelity(contract);
     contract.coverage = contract.coverage || {
       request: { keysFound: [] },
       response: { pathsFound: [] },
@@ -229,7 +241,11 @@ function captureMerge(projectSlug, opts = {}) {
       gaps: [],
     };
     contract.coverage.gaps = (contract.coverage.gaps || []).filter(
-      (g) => g !== 'no_property_access' && g !== 'no_export_symbol',
+      (g) =>
+        g !== 'no_property_access' &&
+        g !== 'no_export_symbol' &&
+        g !== 'TRACE_EMPTY' &&
+        g !== 'no_callsite',
     );
     contract.coverage.response = {
       ...contract.coverage.response,
