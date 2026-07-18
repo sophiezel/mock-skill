@@ -9,6 +9,7 @@ const {
   loadSession,
 } = require('../lib/session-config');
 const { appendAudit } = require('../lib/audit');
+const { journalSummary } = require('../lib/service-store');
 
 function pidAlive(pid) {
   if (!pid || typeof pid !== 'number') return false;
@@ -78,6 +79,8 @@ function stopSession(opts = {}) {
 
   if (!state) {
     console.log('[mock-skill] no runtime state; nothing to stop');
+    const journal = journalSummary();
+    console.log(journal.line);
     let captureCount = 0;
     for (const slug of catalogs) {
       captureCount += hintMergeIfCaptures(slug) || 0;
@@ -89,7 +92,13 @@ function stopSession(opts = {}) {
         captureMerge(slug, { taskId: opts.taskId || null }),
       );
     }
-    return { killed: false, captureCount, mergeResult, catalogs };
+    return {
+      killed: false,
+      captureCount,
+      journalHits: journal.hits,
+      mergeResult,
+      catalogs,
+    };
   }
 
   const sessionPid = state.mock?.pid;
@@ -131,6 +140,9 @@ function stopSession(opts = {}) {
     `[mock-skill] stop catalogs=${catalogs.join(',')} sessionPid=${sessionPid || '-'} killed=${killedSession} chromePid=${chromePid || '-'} killed=${killedChrome}`,
   );
 
+  const journal = journalSummary();
+  console.log(journal.line);
+
   let captureCount = 0;
   for (const slug of catalogs) {
     captureCount += hintMergeIfCaptures(slug) || 0;
@@ -150,6 +162,7 @@ function stopSession(opts = {}) {
     killedSession,
     killedChrome,
     captureCount,
+    journalHits: journal.hits,
     mergeResult,
     catalogs,
   };

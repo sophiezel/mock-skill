@@ -31,19 +31,11 @@ mock-skill start --name=demo
 # mock-skill start --name=demo --start-url=http://localhost:8080
 ```
 
-Catalog（真源）在 `.data/services/<upstreamId>/`；项目索引在 `.data/projects/demo/index.json`；运行时状态在全局 `.data/session.json`。停掉：
+Catalog（真源）在 `.data/services/<upstreamId>/`；项目索引在 `.data/projects/demo/index.json`；运行时状态在全局 `.data/session.json`。`init` 会静默写出域草稿并尽量绑上 CRUD Store；`start` 默认清空 Store（保留用 `--keep-state`）。停掉：
 
 ```bash
 mock-skill stop
-```
-
-有状态服务（同 upstream 共享内存 Store）：
-
-```bash
-mock-skill domain-draft --upstream=prefix-api
-mock-skill materialize-service --upstream=prefix-api
-mock-skill service reset --upstream=prefix-api
-mock-skill service journal
+# 会打印 journal 一行摘要，例如：journal: 3 hit(s) (…)
 ```
 
 多个前端可同时挂到同一个代理：
@@ -54,6 +46,8 @@ mock-skill start --name=tower --name=other
 ```
 
 项目扫法不一样时，改 `.mock-skill/infer.json` 或加 `--adapter=`。见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
+
+系统学习（前端 mock → 服务 Catalog → Store → 后端推导）按 L0→L6 跟做：[`references/learning-path.md`](./references/learning-path.md)。
 
 ## 常用操作
 
@@ -132,25 +126,27 @@ mock-skill export-msw --out=./msw-handlers.js --name=demo
 
 | 命令 | 干什么 |
 |------|--------|
-| `init` | 扫描项目，生成 catalog |
-| `start` / `stop` | 起停全局 mock+proxy（可多 catalog） |
+| `init` | 扫描项目，生成 catalog（静默 domain-draft + CRUD Store 绑定） |
+| `start` / `stop` | 起停全局 mock+proxy；start 默认 reset Store；stop 打印 journal 摘要 |
 | `rules list\|use\|save` | 共享 rule 文件：列出 / 应用 / 导出 |
 | `scenario` / `set-case` | 切场景或单个接口响应 |
 | `smoke [--ci]` | 冒烟 |
 | `start --record` / `record` / `mock` / `merge` | 录真实响应、写回、切回 mock |
-| `traffic` / `list-empty` / `import-openapi` / `export-msw` / `classify` / `generate` / `audit` | 精细控制 |
+| `help --all` | 高级：`service` / `domain-draft` / `materialize-service` / `traffic` / … |
 
 旧名仍可用：`session start|stop`、`set-scenario`、`capture-merge` 等。
 
 `init` / `generate` 常用 flag：`--force` 清孤儿文件（默认不擦已录数据）；`--overwrite-capture` 才允许用法推断盖掉已录真值；`--strict-usage` 在追踪结果为空时失败。
+`start` 高级 flag：`--keep-state` 保留 Virtual Service 内存状态。
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
+| [`references/learning-path.md`](./references/learning-path.md) | **L0→L6 分层渐进引导（推荐系统学习）** |
 | [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构与设计 |
 | [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 已锁定决策 |
-| [`references/`](./references/) | 扫描、session、场景、E2E、坑 |
+| [`references/`](./references/) | 扫描、session、场景、E2E、坑（工具书） |
 | [`SKILL.md`](./SKILL.md) | Agent 编排（可选） |
 | [`docs/README.md`](./docs/README.md) | 文档索引 |
 

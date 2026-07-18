@@ -39,9 +39,10 @@
 |----|------|
 | 定位 | 在现有 discover + proxy 之上增加 **Virtual Service**：可 mock 响应，也可 mock 同 upstream 的状态与副作用 |
 | 热路径 | proxy → Virtual Service **禁止 LLM**（确定性） |
-| Store | 按 `upstreamId` 作用域的内存 KV / collection；`service reset` 可清空 |
-| CRUD | 仅对确定性识别的 resource cluster 自动绑 Store；非 CRUD 保持 static cases 或 scenario FSM |
-| 域模型草稿 | `domain-draft` 产出 `models.json` / `domain-draft.md`，**须确认**后 materialize；表结构 = 虚拟实体 schema，不连真库 |
+| Store | 按 `upstreamId` 作用域的内存 KV / collection；**`start` 默认 `resetStore('*')`**（高级 `--keep-state`）；运行中可用 `service reset` |
+| CRUD | 仅对确定性识别的 resource cluster 在 `init`/`generate` **自动**绑 Store；非 CRUD 保持 static cases 或 scenario FSM |
+| 域模型草稿 | `init`/`generate` **静默**写 `models.json` / `domain-draft.md`；高级 `domain-draft` / `materialize-service` 仅用于重绑与排障；表结构 = 虚拟实体 schema，不连真库 |
+| Journal | 命中 Virtual Service 时记入内存并落盘 `.data/service-journal.json`；**`stop` / Ctrl+C 打印一行摘要**；明细用 `service journal` |
 | 保真度 L3 | store 或 scenario 生效且可 reset |
 
 ## Classify
@@ -121,11 +122,13 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 
 ## CLI 面
 
-**主轨意图别名（默认 help）**：`init` · `start` · `stop` · `scenario` · `smoke`  
+**主轨意图别名（默认 help）**：`init` · `start` · `stop` · `rules` · `scenario` · `smoke`  
 **辅轨**：`start --record` · `record` · `mock` · `merge`（`stop --auto-merge`）  
-**Advanced / 旧名（`help --all`）**：`classify` · `generate` · `session start\|stop` · `set-case` · `set-scenario` · `traffic …` · `capture-merge` · `list-empty` · `import-openapi` · `export-msw` · `audit` · install/uninstall  
+**Advanced / 旧名（`help --all`）**：`service` · `domain-draft` · `materialize-service` · `classify` · `generate` · `session start\|stop` · `set-case` · `set-scenario` · `traffic …` · `capture-merge` · `list-empty` · `import-openapi` · `export-msw` · `audit` · install/uninstall  
 
-`--record` 与 `--traffic=` 互斥；默认 `help` 分层，不把辅轨/Advanced 冲淡主轨。
+`--record` 与 `--traffic=` 互斥；默认 `help` 分层，不把辅轨/Advanced 冲淡主轨。  
+出错时打印 `see: references/guide-lN-….md#锚点`；系统学习见 [`references/learning-path.md`](../references/learning-path.md)。  
+`start --keep-state`：保留 Virtual Service 内存与 journal（默认每次 start 清空）。
 
 ## 验证基线
 

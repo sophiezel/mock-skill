@@ -17,7 +17,7 @@
 | Service Catalog | mocks/contracts 真源按 `upstreamId`；project 仅 `index.json` |
 | Virtual Service + Store | 每 upstream 内存 store；handler 可读写；`service reset` |
 | CRUD resource cluster | 确定性配对 list/detail CRUD → store-backed handlers |
-| domain-draft | 虚拟实体草稿 + 确认门（热路径禁 LLM） |
+| domain-draft | 虚拟实体草稿；init/generate 静默写入（热路径禁 LLM）；高级 CLI 可重跑 |
 
 ## P1（后续）
 

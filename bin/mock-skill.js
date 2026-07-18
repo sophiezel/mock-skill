@@ -69,12 +69,9 @@ mock-skill — frontend API mock CLI (single proxy, multi catalog)
 
 Primary:
   mock-skill init [projectDir] [--name=slug] [--task=ID] [--adapter=name] [--force] [--strict-usage]
-  mock-skill start [--name=slug…] [--rules kw…] [--start-url=URL] [--scenario=NAME] [--proxy-host=HOST] [--mitm=1]
+  mock-skill start [--name=slug…] [--rules kw…] [--start-url=URL] [--scenario=NAME] [--proxy-host=HOST] [--mitm=1] [--keep-state]
   mock-skill stop [--auto-merge]
   mock-skill rules list|use <kw…>|save <name> [--rules-dir=DIR]
-  mock-skill service reset|journal|status [--upstream=ID]
-  mock-skill domain-draft --upstream=ID [--confirm]
-  mock-skill materialize-service --upstream=ID [--force]
   mock-skill scenario <name> [--name=slug]
   mock-skill smoke [--name=slug] [--ci] [--cases=...] [--scenario=NAME]
 
@@ -85,7 +82,10 @@ Optional (needs real upstream; not for E2E):
 `;
 
   const advanced = `
-Advanced / legacy:
+Advanced / legacy (see references/guide-l6-advanced.md):
+  mock-skill service reset|journal|status [--upstream=ID]
+  mock-skill domain-draft --upstream=ID [--confirm]
+  mock-skill materialize-service --upstream=ID [--force]
   mock-skill classify [--task=ID] [--related-from=path]
   mock-skill generate [--task=ID] [--force] [--overwrite-capture]
   mock-skill session start|stop [...]
@@ -109,16 +109,52 @@ Flags:
   --rules-dir=DIR      override rules directory (default: <pkg>/rules)
   --record             alone: all-passthrough; with --rules: record passthrough only
   --auto-merge         with stop: run capture-merge after stop
+  --keep-state         with start: do not reset Virtual Service store / journal
 `;
 
   const footer = `
 Install: bash scripts/install.sh
 Catalog: .data/services/<upstreamId>/   Project index: .data/projects/<slug>/
 Session: .data/session.json   Rules: rules/
+Learn:   references/learning-path.md  (L0→L6 layered guides)
 Help:    mock-skill help --all
 `;
 
-  console.log(full ? primary + advanced + footer : primary + `\n  mock-skill help --all   # full command list\n` + footer);
+  console.log(
+    full
+      ? primary + advanced + footer
+      : primary +
+          `\n  mock-skill help --all   # advanced commands (service / domain-draft / …)\n` +
+          footer,
+  );
+}
+
+/**
+ * Map common errors to layered guide anchors (progressive disclosure).
+ * @param {string} message
+ * @returns {string|null}
+ */
+function hintForError(message) {
+  const m = String(message || '');
+  if (/port in use|EADDRINUSE/i.test(m)) {
+    return 'see: references/guide-l0-getting-started.md#port-in-use';
+  }
+  if (/no classify|classify result|run mock-skill init/i.test(m)) {
+    return 'see: references/guide-l1-frontend-infer.md#no-classify';
+  }
+  if (/mutually exclusive|--rules forces|conflicting --traffic/i.test(m)) {
+    return 'see: references/guide-l2-runtime.md#traffic-flags';
+  }
+  if (/unknown command/i.test(m)) {
+    return 'see: references/guide-l6-advanced.md#commands';
+  }
+  if (/upstream|domain-draft|materialize|store handler|service reset/i.test(m)) {
+    return 'see: references/guide-l6-advanced.md#repair';
+  }
+  if (/MITM|openssl|allow-open-proxy|0\.0\.0\.0/i.test(m)) {
+    return 'see: references/guide-l2-runtime.md#device-proxy';
+  }
+  return 'see: references/learning-path.md';
 }
 
 function resolveStartTraffic(f) {
@@ -175,6 +211,7 @@ async function runSessionStart(f) {
     recordMockHits: Boolean(f['record-mock-hits']),
     record: Boolean(f.record) && wantRules,
     traffic,
+    keepState: Boolean(f['keep-state']),
   });
 }
 
@@ -516,6 +553,8 @@ async function main() {
   }
 
   console.error(`[mock-skill] unknown command: ${cmd}`);
+  const hint = hintForError('unknown command');
+  if (hint) console.error(`[mock-skill] ${hint}`);
   help();
   process.exit(1);
 }
@@ -523,8 +562,10 @@ async function main() {
 if (require.main === module) {
   main().catch((e) => {
     console.error(`[mock-skill] error: ${e.message}`);
+    const hint = hintForError(e.message);
+    if (hint) console.error(`[mock-skill] ${hint}`);
     process.exit(1);
   });
 }
 
-module.exports = { parseArgs, resolveStartTraffic, help };
+module.exports = { parseArgs, resolveStartTraffic, help, hintForError };

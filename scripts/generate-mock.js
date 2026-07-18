@@ -994,10 +994,14 @@ function generateMocks({
     prunedContracts = pruned.prunedContracts;
   }
 
-  // Phase 2: auto-bind store handlers for CRUD resource clusters
+  // Phase 2: auto-bind store handlers + silent domain-draft for CRUD clusters
   let storeRewritten = [];
+  let domainDrafts = [];
   try {
-    const { materializeStoreHandlers } = require('../lib/service-infer');
+    const {
+      materializeStoreHandlers,
+      writeDomainDraft,
+    } = require('../lib/service-infer');
     for (const up of upstreamIds) {
       const stubs = rules
         .filter((r) => sanitizeUpstreamId(r.upstreamId) === up)
@@ -1018,6 +1022,21 @@ function generateMocks({
         .filter(Boolean);
       const m = materializeStoreHandlers(up, stubs, { force: false });
       storeRewritten = storeRewritten.concat(m.rewritten);
+      try {
+        const draft = writeDomainDraft({
+          upstreamId: up,
+          stubs,
+          projectSlug,
+          confirm: true,
+        });
+        domainDrafts.push({
+          upstreamId: up,
+          draftPath: draft.draftPath,
+          clusters: draft.clusters,
+        });
+      } catch {
+        /* draft is best-effort */
+      }
     }
   } catch (e) {
     // non-fatal: static handlers remain
@@ -1045,6 +1064,7 @@ function generateMocks({
     capturePreservedCount,
     upstreamIds: [...upstreamIds],
     storeRewritten,
+    domainDrafts,
   };
 }
 

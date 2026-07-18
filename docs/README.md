@@ -1,9 +1,10 @@
 # mock-skill 文档索引
 
 - **使用指南**（安装 / 快速开始 / 命令）：仓库根 [`README.md`](../README.md)
+- **分层学习（L0→L6）**：[`references/learning-path.md`](../references/learning-path.md)
 - **架构与设计**（角色 / Stub Catalog / 流量 / 保真度）：[`ARCHITECTURE.md`](./ARCHITECTURE.md)
 - **Agent 裁决卡**：[`SKILL.md`](../SKILL.md)
-- **操作细节**：[`references/`](../references/)
+- **操作细节（工具书）**：[`references/`](../references/)
 
 **角色边界**（CLI / LLM / Skill）见 [ARCHITECTURE.md](./ARCHITECTURE.md) 与 [DECISIONS.md](./DECISIONS.md) § LLM 介入边界。
 
@@ -14,7 +15,20 @@
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 架构与设计（从 README 拆出） |
 | [DECISIONS.md](./DECISIONS.md) | 已锁定决策与当前约束（优先阅读；含 LLM 边界真源） |
 
-## 操作说明（references）
+## 分层引导（跟做）
+
+| 文档 | 说明 |
+|------|------|
+| [learning-path.md](../references/learning-path.md) | L0→L6 地图 |
+| [guide-l0-getting-started.md](../references/guide-l0-getting-started.md) | 上手 init/start/stop |
+| [guide-l1-frontend-infer.md](../references/guide-l1-frontend-infer.md) | 前端推导 |
+| [guide-l2-runtime.md](../references/guide-l2-runtime.md) | 运行与升阶 |
+| [guide-l3-service-catalog.md](../references/guide-l3-service-catalog.md) | 服务 Catalog |
+| [guide-l4-virtual-service.md](../references/guide-l4-virtual-service.md) | Store / journal |
+| [guide-l5-backend-inference.md](../references/guide-l5-backend-inference.md) | 后端推导 |
+| [guide-l6-advanced.md](../references/guide-l6-advanced.md) | 高级排障 |
+
+## 操作说明（references 工具书）
 
 | 文档 | 说明 |
 |------|------|

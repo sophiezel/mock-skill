@@ -128,6 +128,19 @@ async function startSession(opts = {}) {
   const taskId = opts.taskId || null;
   const names = parseNameList(opts.names != null ? opts.names : opts.name);
   const ruleKeywords = parseRulesKeywords(opts.rules);
+  const keepState =
+    opts.keepState === true ||
+    opts['keep-state'] === true ||
+    opts.keepState === '1';
+
+  // Fresh Virtual Service store each start (advanced: --keep-state).
+  const { resetStore, journalSummary } = require('../lib/service-store');
+  if (!keepState) {
+    resetStore('*');
+    console.log('[mock-skill] store reset (use --keep-state to retain)');
+  } else {
+    console.log('[mock-skill] store kept (--keep-state)');
+  }
 
   // --rules wins: selective allowlist. Ignore all-passthrough / conflicting --traffic=.
   if (ruleKeywords.length && opts.traffic && opts.traffic !== 'selective') {
@@ -389,6 +402,7 @@ async function startSession(opts = {}) {
     await mock.close().catch(() => {});
     saveRuntimeState({ ...state, stoppedAt: new Date().toISOString() });
     appendAudit(primary, { command: 'session stop', taskId, summary: 'stopped' });
+    console.log(journalSummary().line);
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

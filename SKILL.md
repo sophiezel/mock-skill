@@ -30,12 +30,14 @@ disable-model-invocation: true
 
 | 你正在做 | 先读 |
 |----------|------|
-| init / 发现 | `references/infer-from-usage.md` |
+| 系统学习 L0→L6 | `references/learning-path.md` |
+| init / 发现 | `references/guide-l1-frontend-infer.md` → `references/infer-from-usage.md` |
 | 分类 / 冲突 | `references/classify-request.md` |
 | 契约 / cases | `references/contract-schema.md` + `references/scenarios.md` |
 | 生成 handler | `references/generate-mock.md` |
-| session / 真机 | `references/session-and-proxy.md` + `references/e2e-and-device-proxy.md` |
-| 排错 | `references/pitfalls.md` |
+| session / 真机 | `references/guide-l2-runtime.md` → `references/session-and-proxy.md` |
+| Virtual Service | `references/guide-l4-virtual-service.md` |
+| 排错 | `references/guide-l6-advanced.md` → `references/pitfalls.md` |
 
 ## Agent checklist
 

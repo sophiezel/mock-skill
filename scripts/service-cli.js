@@ -38,10 +38,12 @@ function runService(args) {
     return;
   }
 
-  console.log(`Usage:
+  console.log(`Usage (advanced — see references/guide-l6-advanced.md#repair):
   mock-skill service reset [--upstream=ID]
   mock-skill service journal [--limit=N] [--clear]
   mock-skill service status --upstream=ID
+
+Main path auto-resets store on start; stop prints a journal one-liner.
 `);
 }
 

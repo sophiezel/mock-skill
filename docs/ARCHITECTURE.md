@@ -72,7 +72,7 @@ Proxy → TrafficPolicy → VirtualService → Handler
                               └─ StaticCases
 ```
 
-构建期在 `init/generate` 后可跑：`operation-intent` → `resource-cluster` →（可选）`domain-draft` → materialize store handlers。
+构建期在 `init/generate` 后自动：`operation-intent` → `resource-cluster` → 静默 `domain-draft` → materialize store handlers（可失败回退静态 handler）。
 
 ## 保真度与 Shape
 
@@ -81,7 +81,7 @@ Proxy → TrafficPolicy → VirtualService → Handler
 | **L0** | 空信封，无 shape | `import-openapi` / 更好用法 / capture |
 | **L1** | usage/OpenAPI shape + 占位值 | `traffic` 透传 + `capture-merge` |
 | **L2** | 已 capture 真值 | 可选 scenario |
-| **L3** | Store 有状态 / Scenario FSM（可 reset） | `service reset` / scenario reset |
+| **L3** | Store 有状态 / Scenario FSM（可 reset） | `start` 默认 reset；高级 `service reset` / scenario |
 
 **纪律**：Shape 永不发明键；真值只来自 capture / OpenAPI；materialize（jsf）只填已有键。
 
@@ -104,7 +104,7 @@ rules/                         共享 rule 包（可 git；不绑 project）
     proxy-rules.json
     upstreams.json
     models.json                虚拟实体（可选）
-    domain-draft.md            确认前草稿（可选）
+    domain-draft.md            init/generate 静默草稿（高级可重跑）
   projects/<projectSlug>/      前端发现索引 + 项目侧产物
     index.json                 stubs[] / upstreams[]
     classify/ captures/ reports/ audit/ scenarios/
