@@ -7,6 +7,9 @@
 | 项 | 定稿 |
 |----|------|
 | 定位 | **通用 Mock CLI + 可选 Agent Skill 编排层**：前端 Mock 后端 HTTP(S) 接口，后端未通时不阻塞自测与 E2E |
+| 主目标 | **前端与后端 0 依赖**：默认全 mock 挡住阻断性请求；E2E/CI 全程 mock + scenario，不依赖真上游 |
+| 双轨 | **主轨** `init` / `start` / `scenario` / `smoke`（`all-mock`）；**辅轨** `start --record` / `record` / `merge`（可选升 L2，显式依赖上游） |
+| 否决 | **否决**「L0/L1 默认透传真上游」——破坏解耦；录制不得成为日常/E2E 默认路径 |
 | 角色一句话 | **CLI 负责确定性能力；LLM 负责有歧义的语义决策与流程编排；Skill 把边界钉死。** |
 | 仓库 | 本仓（git）；`scripts/install.sh` 一键 `npm link` + 可选 skill symlink |
 | Agent 发现 | 可选 symlink `~/.agents/skills/api-mock-orchestrator` → 本仓（教 Agent 调用 CLI，非产品本体） |
@@ -19,10 +22,14 @@
 
 | 项 | 定稿 |
 |----|------|
-| 项目数据 | 扁平 `.data/projects/<projectSlug>/`（contracts / mocks / captures / reports / audit / scenarios） |
+| 运行时 | **全局** `.data/session.json` + `.data/runtime.json`（单 mock 服务） |
+| Catalog | `.data/projects/<projectSlug>/`（contracts / mocks / captures / reports / audit / scenarios） |
+| Rules | 包根 `rules/*.json`（或 `--rules-dir` / `MOCK_SKILL_RULES_DIR`）；跨 project 共享 |
+| 多 catalog | `start --name=a --name=b` 合并挂载；省略 `--name` = 全部有 proxy-rules 的 catalog |
+| 否决 | 默认「每 project 一份运行时 session / 各起一个代理」 |
 | 无 `_project/`、无按 task 拆分的 mock 层 | 已否决 |
 | `--task` | 仅审计/溯源（`lastTaskId`、`audit/changelog.jsonl`、契约 history），不分区存储 |
-| Chrome profile | `.data/chrome-profiles/<projectSlug>/`，跨 session 复用 |
+| Chrome profile | `.data/chrome-profiles/<primaryCatalog>/` |
 | `.data` | gitignore |
 
 ## Classify
@@ -102,7 +109,11 @@ Scenario 文件 `.data/projects/<slug>/scenarios/<name>.json`：`{ default, apis
 
 ## CLI 面
 
-`init` · `classify` · `generate` · `session start\|stop` · `set-case` · `set-scenario` · `smoke` · `audit` · `capture-merge` · install/uninstall
+**主轨意图别名（默认 help）**：`init` · `start` · `stop` · `scenario` · `smoke`  
+**辅轨**：`start --record` · `record` · `mock` · `merge`（`stop --auto-merge`）  
+**Advanced / 旧名（`help --all`）**：`classify` · `generate` · `session start\|stop` · `set-case` · `set-scenario` · `traffic …` · `capture-merge` · `list-empty` · `import-openapi` · `export-msw` · `audit` · install/uninstall  
+
+`--record` 与 `--traffic=` 互斥；默认 `help` 分层，不把辅轨/Advanced 冲淡主轨。
 
 ## 验证基线
 

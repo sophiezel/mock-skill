@@ -1,7 +1,13 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { resolveProjectSlug, projectDataDir } = require('../lib/paths');
-const { loadRuntimeState, saveRuntimeState } = require('../lib/session-config');
+const {
+  loadRuntimeState,
+  saveRuntimeState,
+  loadSession,
+} = require('../lib/session-config');
 const { appendAudit } = require('../lib/audit');
 
 function pidAlive(pid) {
@@ -24,13 +30,66 @@ function tryKill(pid, signal = 'SIGTERM') {
   }
 }
 
+/** Count capture artifact files under captures/. */
+function countCaptureFiles(projectSlug) {
+  const root = path.join(projectDataDir(projectSlug), 'captures');
+  if (!fs.existsSync(root)) return 0;
+  let n = 0;
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      const st = fs.statSync(full);
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile() && (name.endsWith('.json') || name.endsWith('.jsonl'))) n += 1;
+    }
+  };
+  walk(root);
+  return n;
+}
+
+function hintMergeIfCaptures(projectSlug) {
+  const n = countCaptureFiles(projectSlug);
+  if (n > 0) {
+    console.log(
+      `[mock-skill] hint: ${n} capture file(s) in ${projectSlug} — run: mock-skill merge --name=${projectSlug}`,
+    );
+    console.log(
+      `[mock-skill] hint: or next time: mock-skill stop --auto-merge`,
+    );
+  }
+  return n;
+}
+
 function stopSession(opts = {}) {
   const projectDir = opts.projectDir || process.cwd();
-  const projectSlug = resolveProjectSlug(projectDir, opts.name);
-  const state = loadRuntimeState(projectSlug);
+  const hintSlug = resolveProjectSlug(projectDir, opts.name);
+  const state = loadRuntimeState(hintSlug);
+
+  let catalogs;
+  if (state && Array.isArray(state.activeCatalogs) && state.activeCatalogs.length) {
+    catalogs = state.activeCatalogs;
+  } else if (opts.name) {
+    catalogs = [hintSlug];
+  } else {
+    const sessionCatalogs = loadSession().activeCatalogs || [];
+    catalogs = sessionCatalogs.length ? sessionCatalogs : [hintSlug];
+  }
+  const primary = (state && state.projectSlug) || catalogs[0] || hintSlug;
+
   if (!state) {
     console.log('[mock-skill] no runtime state; nothing to stop');
-    return { killed: false };
+    let captureCount = 0;
+    for (const slug of catalogs) {
+      captureCount += hintMergeIfCaptures(slug) || 0;
+    }
+    let mergeResult = null;
+    if (opts.autoMerge) {
+      const { captureMerge } = require('./capture-merge');
+      mergeResult = catalogs.map((slug) =>
+        captureMerge(slug, { taskId: opts.taskId || null }),
+      );
+    }
+    return { killed: false, captureCount, mergeResult, catalogs };
   }
 
   const sessionPid = state.mock?.pid;
@@ -38,11 +97,9 @@ function stopSession(opts = {}) {
   let killedSession = false;
   let killedChrome = false;
 
-  // Prefer signaling the foreground session process (owns mock+proxy servers)
   if (sessionPid && sessionPid !== process.pid) {
     killedSession = tryKill(sessionPid, 'SIGTERM');
     if (killedSession) {
-      // brief wait then escalate
       const start = Date.now();
       while (pidAlive(sessionPid) && Date.now() - start < 1500) {
         /* spin */
@@ -58,26 +115,47 @@ function stopSession(opts = {}) {
     }
   }
 
-  saveRuntimeState(projectSlug, {
+  saveRuntimeState({
     ...state,
     stoppedAt: new Date().toISOString(),
     note: killedSession
       ? 'stop-session sent SIGTERM to session process'
       : 'stop-session: session pid not alive or is current process — closed state only',
   });
-  appendAudit(projectSlug, {
+  appendAudit(primary, {
     command: 'session stop',
     taskId: opts.taskId || state.taskId || null,
-    summary: `stop killedSession=${killedSession} killedChrome=${killedChrome} pid=${sessionPid || '-'}`,
+    summary: `stop killedSession=${killedSession} killedChrome=${killedChrome} catalogs=${catalogs.join(',')}`,
   });
   console.log(
-    `[mock-skill] stop ${projectSlug}: sessionPid=${sessionPid || '-'} killed=${killedSession} chromePid=${chromePid || '-'} killed=${killedChrome}`,
+    `[mock-skill] stop catalogs=${catalogs.join(',')} sessionPid=${sessionPid || '-'} killed=${killedSession} chromePid=${chromePid || '-'} killed=${killedChrome}`,
   );
-  console.log(`state: ${require('path').join(projectDataDir(projectSlug), 'runtime.json')}`);
-  return { killed: killedSession || killedChrome, killedSession, killedChrome };
+
+  let captureCount = 0;
+  for (const slug of catalogs) {
+    captureCount += hintMergeIfCaptures(slug) || 0;
+  }
+  let mergeResult = null;
+  if (opts.autoMerge) {
+    const { captureMerge } = require('./capture-merge');
+    mergeResult = catalogs.map((slug) =>
+      captureMerge(slug, {
+        taskId: opts.taskId || state.taskId || null,
+      }),
+    );
+  }
+
+  return {
+    killed: killedSession || killedChrome,
+    killedSession,
+    killedChrome,
+    captureCount,
+    mergeResult,
+    catalogs,
+  };
 }
 
-module.exports = { stopSession, pidAlive, tryKill };
+module.exports = { stopSession, pidAlive, tryKill, countCaptureFiles, hintMergeIfCaptures };
 
 if (require.main === module) {
   stopSession({ projectDir: process.cwd() });

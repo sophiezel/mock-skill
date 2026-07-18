@@ -1,245 +1,155 @@
 # mock-skill
 
-前端 API Mock **CLI**：内置 Mock 运行时 + 可开关正向代理，用于后端未通时的自测与 E2E（桌面 + 真机 WebView）。**不改业务仓代码**、不依赖 Whistle/Charles、不绑定特定前端框架。
+从前端代码扫出接口、生成 mock，再用本地代理把请求拦下来。业务仓不用改，也不绑特定框架。桌面自测和真机 WebView 都能用。
 
-附带可选 Agent Skill 入口（教 Agent 正确调用本 CLI），**不是**产品本体。
+需要 Node >= 18。装完之后命令是 `mock-skill`。
 
-> **CLI 负责确定性能力；LLM 负责有歧义的语义决策与流程编排；Skill 把边界钉死。**
-
-## 架构与角色
-
-| 角色 | 职责 |
-|------|------|
-| CLI / runtime | discover、generate、session、proxy、scenario、capture-merge、smoke |
-| LLM（或人） | 有任务时的 classify、冲突决议、`new` IO 起草（须确认）、缺口解释与下一步 |
-| Skill（[`SKILL.md`](./SKILL.md)） | checklist + BLOCK/禁宣称规则；禁止 Agent 自写脚本绕开 CLI |
-
-LLM 介入边界（摘要；**真源**见 [`docs/DECISIONS.md`](./docs/DECISIONS.md) § LLM 介入边界）：
-
-| 时机 | LLM？ |
-|------|-------|
-| 读 Skill / 编排命令 | 是 |
-| Discover / Generate / Session / set-case\|scenario | 否 |
-| Proxy 命中、delay/fault | **否**（热路径禁模型） |
-| 无任务全量 init 的 classify | 否（启发式） |
-| 有 `--task` / 需求语义的 classify | 是（或人） |
-| `new` 无文档 IO / modify 冲突决议 | 是（或人） |
-| capture-merge 核心 / smoke | 否 |
-
-## 一键安装
-
-先装 CLI，再按需挂 Skill：
+## 安装
 
 ```bash
 bash scripts/install.sh
 ```
 
-等价：
+也可以 `npm install && npm link`。若要给 Agent 发现，可再链一份：
 
 ```bash
-npm install && npm link
-# 可选：供 Cursor/Agent 发现编排约束
 ln -sfn "$(pwd)" ~/.agents/skills/api-mock-orchestrator
 ```
 
-> Node >= 18。安装后 CLI 名 `mock-skill` 全局可用。
+```bash
+mock-skill --help
+mock-skill help --all    # 含较少用的命令和旧名
+```
 
-## 在业务项目预生成全部接口 Mock
+## 快速开始
 
 ```bash
 cd /path/to/frontend-app
-mock-skill init
-mock-skill init --task=TR-1234 --related-from=./docs/req.md
-mock-skill init --adapter=create-request   # 可选：叠加 adapters/<name>.js
-mock-skill init --strict-usage             # TRACE_EMPTY > 0 时非零退出
+mock-skill init --name=demo
+mock-skill start --name=demo
+# 需要打开页面时：
+# mock-skill start --name=demo --start-url=http://localhost:8080
 ```
 
-默认扫描 HTTP CallShape（`request(url,{method})` / `axios.get` / `$HTTP` 等）+ 用法倒推响应字段；`createRequest` 亦内置。项目差异写 `<project>/.mock-skill/infer.json`（`callShapes` / `importSources` / `httpWrappers` / `pathAliases`），或用 `--adapter=` 叠加 `adapters/`。详见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
-
-**样例数据（静态优先）**：
-
-- init 从用法倒推 **接口字段**（`exportKey=file#name` 身份绑定，同名跨模块不串台），经 JSON Schema + `json-schema-faker` 填占位值；**不发明字段**。
-- 成功主看 `usageBackedCount` / `usageBackedHints`；有调用点但 shape 空记 `TRACE_EMPTY`（`--strict-usage` 可硬失败）。
-- **`capture-merge`：显式真值写入**（以捕获数据为准，`response.source=usage+capture`）。**不是**补洞/自动兜底。
-- **覆盖矩阵**：普通 `init`/`generate`（含裸 `--force`）**保留**已有 capture；仅 `--overwrite-capture` 允许 usage 盖掉真值。
-- `no_export_symbol` 且空 shape → `skippedEmpty`（不渲空 handler）。
+Catalog（mocks / contracts）在 `.data/projects/demo/`；运行时状态在全局 `.data/session.json`。停掉：
 
 ```bash
-mock-skill capture-merge --name=<slug>           # 以真实捕获为准
-mock-skill generate --force --overwrite-capture  # 显式允许 usage 覆盖 capture
+mock-skill stop
 ```
 
-数据落在（扁平，一项目一份）：
-
-```
-.data/projects/<projectSlug>/
-```
-
-`--task` 只做需求溯源（契约 history / `audit/changelog.jsonl`），**不**拆分 mock 目录。无任务全量 init 时分类启发式为 `dependency`（不强制 LLM）。
-
-### Stub Catalog（多环境 host 共享一套 mock）
-
-一个 stub = 一个逻辑 API（`METHOD + upstreamId + path`），多环境 host 作为匹配器（`hosts[]`），不再按 FQDN 分目录。
-
-```
-mocks/<upstreamId>/<METHOD>/<path>/index.js   ← 一套 mock 数据
-proxy-rules.json: { stubId, upstreamId, hosts[], pathPrefix, methods }
-upstreams.json:  { upstreamId: { hosts[], canonicalHost } }
-```
-
-- `upstreamId`：逻辑服务标识（来自 `hostVar` 变量名 / `prefixKey` / 归一化 host label），不含 FQDN。
-- `hosts[]`：该服务所有环境域名（prod / stage / dev / ...），proxy 命中任一即路由到同一 stub。
-- `stubId`：全链路统一身份（infer → classify → contract → proxy-rules → runtime → set-case → capture → smoke → audit → openapi → export-msw）。
-- 代理零侵入：客户端仍打真实域名，proxy 命中后注入 `x-mock-stub-id` header 路由到 mock handler。
-- 空 stub 闭环：无字段也能生成 contract、列出、由 capture-merge 填充；指标按 stub 计数（`stubsTotal` / `emptyStubs` / `multiHostStubs`）。
-
-**通用性约束**：本工具不含任何业务仓硬编码、不依赖特定公司域名或内部服务名。同一份代码可 `init` 任意前端项目。
-
-### 保真度阶梯（fidelity）与最短路径
-
-每个 stub 标注 `fidelity`（contract 字段 + init 报告 `coverage-summary.json`）：
-
-| 级 | 含义 | 升阶动作 |
-|----|------|----------|
-| **L0** | 空信封：无 shape，`data={}` | `capture-merge` 或 `import-openapi` 补 shape |
-| **L1** | usage/OpenAPI shape + 占位值 | `session` + `capture-merge` 换真值 |
-| **L2** | 已 capture 真实 body（`source=usage+capture`） | 可选 `set-case` 加场景 |
-| **L3** | 场景 / 有状态（预留） | — |
-
-**最短路径（任意项目，无业务仓依赖）**：
+多个前端可同时挂到同一个代理：
 
 ```bash
-cd /path/to/any-frontend-app
-mock-skill init --name=<slug>                      # 生成 stubs；报告显示 fidelity L0/L1 分布
-mock-skill list-empty --name=<slug>                # 列出待填充的空 stub（可 --gap=TRACE_EMPTY 过滤）
-mock-skill session start --name=<slug>             # 打开带代理的【Mock 自测浏览器】，浏览主流程
-mock-skill capture-merge --name=<slug>             # 以真实捕获填充 stubs，自动清 TRACE_EMPTY/no_callsite，标 L2
-mock-skill list-empty --name=<slug>                 # 复查：剩余空 stub 应只剩真正无用法的死导出
+mock-skill start --name=tower --name=other
+# 省略 --name 则挂载全部已有 catalog
 ```
 
-- `capture-merge` 默认开启 **最小 PII/Token 脱敏**（`authorization` / `token` / `password` / `cookie` 等键，子串匹配，递归 header+body）；`--no-sanitize` 关闭，`--sensitive-paths=k1,k2` 追加。
-- `list-empty --all` 按 L0/L1/L2/L3 分组打印全部 stub；`--gap=<GAP>` 按 gap 类型过滤（见 [`references/infer-from-usage.md`](./references/infer-from-usage.md) Gap 分类学）。
-- 录制路径按 slug 隔离：`.data/projects/<slug>/captures/`，`--name` 可任意命名（不绑定本机业务仓路径）。
+项目扫法不一样时，改 `.mock-skill/infer.json` 或加 `--adapter=`。见 [`references/infer-from-usage.md`](./references/infer-from-usage.md)。
 
-### Shape 通道：声明式 UI 字段 + 跨文件 props-drill
+## 常用操作
 
-静态推断按「缺口层」扩展，**有界**（不做全程序分析，不臆造字段）：
-
-- **DeclarativeFieldSource plugin**：抽象 `columns[].dataIndex` / `fieldNames` 等「配置驱动 UI」字段提取，**按 JSX 属性名匹配，不绑定组件库符号**。内置 `table-columns-dataIndex`、`select-fieldNames`；项目可在 `.mock-skill/infer.json` 声明自定义模式：
-
-  ```json
-  {
-    "declarativeFieldSources": [
-      { "name": "proj-datagrid", "dataSourceProp": "rows", "columnsProp": "fields", "fieldKey": "key" }
-    ]
-  }
-  ```
-
-  任意组件（`DataGrid` / `DataList` / 自研列表）只要暴露对应属性名即可被识别，无需改引擎代码。
-
-- **一层跨文件 props-drill**：父组件 `<Child detail={payload} />` 传整对象给子组件、子组件读 `detail.name` 时，自动把子组件参数上的 `param.field` 回连到父响应 shape（仅一层，不做 store / 全程序分析）。超出此边界 → 标 `TRACE_EMPTY` / `props_shallow_only`，导向 `capture-merge` / `import-openapi`。
-- **路径参数化**：`${hostVar}/users/${id}` 这类「hostVar 前缀 + 尾部动态段」模板会被参数化为 `/users/:id`（不再整条丢弃）。
-
-**纪律**：Shape 通道永不发明键；真值永远走 capture / OpenAPI。多环境共享由 stub catalog 保证。
-
-## 自测 Session
+**按 rule 文件只 mock 一部分**（共享 `rules/`，不绑 project）：
 
 ```bash
-mock-skill session start --task=TR-1234 --start-url=http://localhost:8080
-# 使用打印出的【Mock 自测浏览器】（带 --proxy-server → 127.0.0.1）
-mock-skill set-scenario e2e-fault   # 或 session start --scenario=e2e-fault
+# rules/jian-h5.json、rules/xrk.json — stubs 并集走 mock，其余透传
+mock-skill start --name=tower --name=other --rules jian-h5 xrk
+# 同时 --record：仍以 rules 为准（selective）；其余透传会写入 captures/
+mock-skill start --name=tower --rules jian-h5 --record
+mock-skill rules use jian-h5 xrk    # 运行中热切换
+mock-skill rules list
+mock-skill rules save my-pack       # 从当前 session 导出
+```
+
+**切场景**（成功 / 故障 / 慢）：
+
+```bash
+mock-skill start --name=demo
+mock-skill scenario e2e-fault    # 或 e2e-happy / e2e-slow
+mock-skill set-case "GET svc-a/v1/items" biz_error
+```
+
+详见 [`references/scenarios.md`](./references/scenarios.md)。
+
+**CI 冒烟**：
+
+```bash
+mock-skill start --name=demo --no-auto-launch
+mock-skill scenario e2e-happy
 mock-skill smoke --ci
-# Ctrl+C 结束 session
+mock-skill stop --name=demo
 ```
 
-开关与端口：
+**录真实响应写回 mock**（要能打到上游）：
 
 ```bash
-mock-skill session start --proxy=0 --mock-port=3901
-mock-skill session start --proxy-port=19000
+mock-skill start --name=demo --record
+# 浏览器走一遍主流程…
+mock-skill stop --name=demo --auto-merge
 ```
 
-真机 WebView（Wi‑Fi 代理，业务代码零改）：
+同一 session 里热切换：`mock-skill record` → 操作 → `mock-skill merge` → `mock-skill mock`。
+
+**真机代理**：
 
 ```bash
-mock-skill session start --proxy-host=0.0.0.0 --scenario=e2e-fault --start-url=http://localhost:8080
-# 按启动日志【真机 Wi‑Fi 代理】块填写：LAN IP / port / 当前 scenario
-# listen=0.0.0.0；桌面 Chrome 仍走 127.0.0.1
-# 默认 missPolicy=reject（防开放代理）；需要透传时显式 --allow-open-proxy
-# 仅信任局域网，勿在公共 Wi‑Fi 开 0.0.0.0
+mock-skill start --name=demo --proxy-host=0.0.0.0 --allow-open-proxy
+# 按日志填手机 Wi‑Fi 代理；HTTPS 加 --mitm=1（要 openssl）
 ```
 
-**HTTPS 说明（诚实边界）**：
+见 [`references/e2e-and-device-proxy.md`](./references/e2e-and-device-proxy.md)。
 
-| 模式 | 行为 |
-|------|------|
-| 默认 | CONNECT **仅隧道透传**，**不改写** HTTPS 响应 |
-| `--mitm=1` | 对 `proxy-rules` 命中 host 做本地 CA MITM（需 openssl；真机/桌面须信任打印的 CA） |
-| 外挂 | 仍可用 Whistle 等做 MITM，再链到本 CLI |
-
-生产 H5 几乎全是 HTTPS —— 真机要改写响应请加 `--mitm=1` 并安装 CA，或走 HTTP 调试域。
-
-详见 [`references/e2e-and-device-proxy.md`](./references/e2e-and-device-proxy.md)。
-
-## 场景引擎
-
-每个 API 自动生成标准 case，运行时可单切或批量切：
-
-| caseId | 含义 |
-|--------|------|
-| `success` / `empty` / `biz_error` | 业务层 |
-| `http_401/403/404/500/502` | HTTP 层故障 |
-| `dep_fail` | 依赖故障（= `http_502`） |
-| `slow` / `timeout` / `offline` | 弱网 / 超时 / 断连 |
+**补空数据 / 导入 OpenAPI**：
 
 ```bash
-mock-skill set-case <apiId> <caseId>
-mock-skill set-scenario e2e-fault     # 批量切多接口
+mock-skill list-empty --name=demo
+mock-skill import-openapi --from=./openapi.json --name=demo
 ```
 
-内置模板：`e2e-happy` / `e2e-fault` / `e2e-slow`。详见 [`references/scenarios.md`](./references/scenarios.md)。
+**部分接口 mock、其余透传**：
 
-## CLI
+```bash
+mock-skill traffic selective --name=demo
+mock-skill traffic allow "GET svc-a/v1/items" --name=demo
+mock-skill start --name=demo --traffic=selective
+```
 
-| 命令 | 作用 |
-|------|------|
-| `mock-skill init [--adapter=] [--force] [--overwrite-capture] [--strict-usage]` | 全量扫描并预生成 mock |
-| `mock-skill import-openapi --from=<spec.json\|yaml>` | 从 OpenAPI JSON/YAML 生成 contracts/handlers（按 stubId 与 usage 合并，OpenAPI ≥ usage） |
-| `mock-skill export-msw` | 导出 MSW handlers 供单测 |
-| `mock-skill classify` | 分类 |
-| `mock-skill generate [--force] [--overwrite-capture]` | 按分类结果生成（默认可保 capture） |
-| `mock-skill session start\|stop` | 起停 mock±proxy（`--proxy-host` / `--scenario`） |
-| `mock-skill set-case` | 单接口切换用例 |
-| `mock-skill set-scenario` | 批量切换场景 |
-| `mock-skill smoke [--ci] [--scenario=]` | 冒烟（CI 非零退出；默认跳过 timeout/offline） |
-| `mock-skill audit --task=` | 追因 |
-| `mock-skill capture-merge [--no-sanitize] [--sensitive-paths=]` | 以真实捕获覆盖对应接口 success 数据（默认脱敏 PII/Token） |
-| `mock-skill list-empty [--gap=] [--all]` | 列出空/低保真度 stub，按 gap 类型过滤或按 L0/L1/L2/L3 分组 |
+**导出 MSW**：
 
-**init / generate 常用 flags：**
+```bash
+mock-skill export-msw --out=./msw-handlers.js --name=demo
+```
 
-| flag | 含义 |
-|------|------|
-| `--force` | 无 merge 重生 + 可 prune 孤儿；**默认仍不擦** `usage+capture` |
-| `--overwrite-capture` | 允许 usage/jsf 盖掉已有 capture 真值 |
-| `--strict-usage` | （仅 init）存在 `TRACE_EMPTY` 时非零退出 |
+## 命令
+
+| 命令 | 干什么 |
+|------|--------|
+| `init` | 扫描项目，生成 catalog |
+| `start` / `stop` | 起停全局 mock+proxy（可多 catalog） |
+| `rules list\|use\|save` | 共享 rule 文件：列出 / 应用 / 导出 |
+| `scenario` / `set-case` | 切场景或单个接口响应 |
+| `smoke [--ci]` | 冒烟 |
+| `start --record` / `record` / `mock` / `merge` | 录真实响应、写回、切回 mock |
+| `traffic` / `list-empty` / `import-openapi` / `export-msw` / `classify` / `generate` / `audit` | 精细控制 |
+
+旧名仍可用：`session start|stop`、`set-scenario`、`capture-merge` 等。
+
+`init` / `generate` 常用 flag：`--force` 清孤儿文件（默认不擦已录数据）；`--overwrite-capture` 才允许用法推断盖掉已录真值；`--strict-usage` 在追踪结果为空时失败。
 
 ## 文档
 
-- 定稿决策（含 LLM 边界真源）：[docs/DECISIONS.md](./docs/DECISIONS.md)
-- 后续登记：[docs/BACKLOG.md](./docs/BACKLOG.md)
-- 索引与计划存档：[docs/README.md](./docs/README.md)
-- 操作手册：[`references/`](./references/)（infer / classify / scenarios / e2e）
+| 文档 | 内容 |
+|------|------|
+| [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | 架构与设计 |
+| [`docs/DECISIONS.md`](./docs/DECISIONS.md) | 已锁定决策 |
+| [`references/`](./references/) | 扫描、session、场景、E2E、坑 |
+| [`SKILL.md`](./SKILL.md) | Agent 编排（可选） |
+| [`docs/README.md`](./docs/README.md) | 文档索引 |
 
 ## 测试
 
 ```bash
-npm test                 # node:test 单测 + 集成
-npm run test:smoke       # fixtures/generic-web：init → smoke --ci → set-scenario → proxy
-npm run test:upstream-e2e # fixtures/multi-host-web：infer → collapse → generate → proxy match → router
-npm run test:all         # 全部
+npm test                  # 单测
+npm run test:smoke        # fixture smoke
+npm run test:upstream-e2e # multi-host
+npm run test:all          # 全部
 ```
-
-## Agent Skill（可选）
-
-安装时的 symlink 将本仓暴露为 `api-mock-orchestrator`，供 Agent 加载**编排约束与裁决卡**（checklist / BLOCK / 场景决策树）。完整命令与端口说明以本 README 为准；Agent 入口见 [`SKILL.md`](./SKILL.md)。

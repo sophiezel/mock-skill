@@ -97,17 +97,24 @@ function resolveHandlerFile(mocksRoot, urlPath, hostHeader) {
  * @returns {string|null}
  */
 function resolveStubHandlerFile(mocksRoot, ctx = {}) {
-  const root = path.resolve(mocksRoot);
-  const { stubId, method, urlPath, upstreamId, forwardedHost, hostToUpstream } = ctx;
+  const { stubId, method, urlPath, upstreamId, forwardedHost, hostToUpstream, resolveMocksRoot } =
+    ctx;
 
   // Primary: stub header from proxy
   if (stubId) {
     let parsed;
+    let decoded = stubId;
     try {
+      decoded = decodeURIComponent(stubId);
       const { parseStubId } = require('../../lib/paths');
-      parsed = parseStubId(decodeURIComponent(stubId));
+      parsed = parseStubId(decoded);
     } catch {
       return null;
+    }
+    let root = path.resolve(mocksRoot);
+    if (typeof resolveMocksRoot === 'function') {
+      const alt = resolveMocksRoot(decoded);
+      if (alt) root = path.resolve(alt);
     }
     const up = (parsed.upstreamId || '').replace(/[^a-zA-Z0-9._-]+/g, '_');
     const m = (parsed.method || method || 'GET').toUpperCase();
@@ -118,6 +125,7 @@ function resolveStubHandlerFile(mocksRoot, ctx = {}) {
     if (jailed && fs.existsSync(jailed)) return jailed;
     return null;
   }
+  const root = path.resolve(mocksRoot);
 
   // Direct: host → upstream mapping
   if (forwardedHost && typeof hostToUpstream === 'function') {
@@ -181,7 +189,7 @@ function sendPlan(res, plan) {
   res.status(status).json(plan.body);
 }
 
-function createRouter({ mocksRoot, caseHeader }) {
+function createRouter({ mocksRoot, caseHeader, resolveMocksRoot = null }) {
   const router = express.Router();
 
   const handler = async (req, res) => {
@@ -193,6 +201,7 @@ function createRouter({ mocksRoot, caseHeader }) {
         stubId: stubIdHeader,
         method: req.method,
         urlPath: req.path,
+        resolveMocksRoot,
       });
     } else {
       filePath = resolveHandlerFile(mocksRoot, req.path, host);

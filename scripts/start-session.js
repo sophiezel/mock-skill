@@ -4,14 +4,30 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const net = require('net');
+const os = require('os');
 const {
-  resolveProjectSlug,
   ensureProjectDirs,
   projectDataDir,
   chromeProfileDir,
 } = require('../lib/paths');
-const { loadSession, saveRuntimeState, deepMerge } = require('../lib/session-config');
+const {
+  loadSession,
+  saveSession,
+  saveRuntimeState,
+  deepMerge,
+} = require('../lib/session-config');
 const { appendAudit } = require('../lib/audit');
+const {
+  resolveActiveCatalogs,
+  mergeCatalogs,
+  mocksRootFor,
+  capturesDirFor,
+  parseNameList,
+} = require('../lib/catalog-merge');
+const {
+  parseRulesKeywords,
+  applyRulesToSession,
+} = require('../lib/rules');
 const { startMockServer } = require('../runtime/mock-server/server');
 const { startProxyServer } = require('../runtime/proxy/server');
 
@@ -33,13 +49,10 @@ function findChrome() {
   ];
   for (const c of candidates) {
     if (c.startsWith('/') && fs.existsSync(c)) return c;
-    // bare name — hope PATH
     if (!c.startsWith('/')) return c;
   }
   return null;
 }
-
-const os = require('os');
 
 function lanIp() {
   const ifaces = os.networkInterfaces();
@@ -90,10 +103,13 @@ function applySessionOpts(base, opts = {}) {
   if (opts.recordMockHits === true) {
     patch.proxy = { ...(patch.proxy || {}), recordMockHits: true };
   }
-  if (opts.mockPort != null || opts.proxyPort != null) {
-    // already handled above
+  if (opts.traffic) {
+    const { normalizeTrafficMode } = require('../lib/traffic-mode');
+    patch.proxy = {
+      ...(patch.proxy || {}),
+      trafficMode: normalizeTrafficMode(opts.traffic),
+    };
   }
-  // Validate numeric ports
   if (patch.mock?.port != null && !Number.isFinite(patch.mock.port)) {
     throw new Error(`invalid --mock-port: ${opts.mockPort}`);
   }
@@ -103,17 +119,69 @@ function applySessionOpts(base, opts = {}) {
   return Object.keys(patch).length ? deepMerge(base, patch) : base;
 }
 
+/**
+ * @param {object} opts
+ * @param {string|string[]} [opts.name] — one or more catalog slugs
+ * @param {string|string[]} [opts.rules] — rule keywords
+ */
 async function startSession(opts = {}) {
-  const projectDir = path.resolve(opts.projectDir || process.cwd());
-  const projectSlug = resolveProjectSlug(projectDir, opts.name);
   const taskId = opts.taskId || null;
-  ensureProjectDirs(projectSlug);
+  const names = parseNameList(opts.names != null ? opts.names : opts.name);
+  const ruleKeywords = parseRulesKeywords(opts.rules);
 
-  let cfg = applySessionOpts(loadSession(projectSlug), opts);
+  // --rules wins: selective allowlist. Ignore all-passthrough / conflicting --traffic=.
+  if (ruleKeywords.length && opts.traffic && opts.traffic !== 'selective') {
+    if (opts.traffic === 'all-passthrough') {
+      console.log(
+        '[mock-skill] ignoring all-passthrough/--record traffic mode; --rules keeps selective',
+      );
+    } else {
+      throw new Error(
+        '--rules forces selective traffic; do not pass conflicting --traffic=',
+      );
+    }
+  }
+
+  const catalogs = resolveActiveCatalogs({
+    names: names.length ? names : undefined,
+    allIfEmpty: true,
+  });
+  for (const slug of catalogs) ensureProjectDirs(slug);
+
+  const merged = mergeCatalogs(catalogs);
+  saveSession({ activeCatalogs: catalogs });
+
+  if (ruleKeywords.length) {
+    applyRulesToSession(ruleKeywords, { rulesDir: opts.rulesDir });
+    if (opts.record) {
+      saveSession({
+        proxy: {
+          ...(loadSession().proxy || {}),
+          recordMisses: true,
+        },
+      });
+    }
+  }
+
+  let cfg = applySessionOpts(loadSession(catalogs[0]), opts);
+  if (opts.traffic && !ruleKeywords.length) {
+    const { normalizeTrafficMode } = require('../lib/traffic-mode');
+    saveSession({
+      proxy: {
+        ...(loadSession().proxy || {}),
+        trafficMode: normalizeTrafficMode(opts.traffic),
+      },
+    });
+    cfg = applySessionOpts(loadSession(), opts);
+  }
   if (opts.scenario) {
     const { setScenario } = require('./set-scenario');
-    setScenario({ projectDir, name: opts.name, scenario: opts.scenario, taskId });
-    cfg = applySessionOpts(loadSession(projectSlug), opts);
+    setScenario({
+      name: catalogs[0],
+      scenario: opts.scenario,
+      taskId,
+    });
+    cfg = applySessionOpts(loadSession(), opts);
   }
 
   const mockHost = cfg.mock.host || '127.0.0.1';
@@ -128,26 +196,34 @@ async function startSession(opts = {}) {
     throw new Error(`proxy port in use: ${proxyHost}:${proxyPort}`);
   }
 
-  const mocksRoot = path.join(projectDataDir(projectSlug), 'mocks');
-  const rulesPath = path.join(projectDataDir(projectSlug), 'proxy-rules.json');
-  let rules = [];
-  if (fs.existsSync(rulesPath)) {
-    rules = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
-  }
+  const primary = catalogs[0];
+  const mocksRoot = mocksRootFor(primary);
+  const stubToCatalog = merged.stubToCatalog;
+  const resolveMocksRoot = (stubId) => {
+    const slug = stubToCatalog[stubId];
+    return slug ? mocksRootFor(slug) : mocksRoot;
+  };
+  const resolveCapturesDir = (stubId) => {
+    const slug = stubToCatalog[stubId] || primary;
+    return capturesDirFor(slug);
+  };
 
   const mock = await startMockServer({
     mocksRoot,
+    resolveMocksRoot,
     host: mockHost,
     port: mockPort,
     cors: cfg.cors,
     caseHeader: cfg.proxy.injectCaseHeader || 'x-mock-case',
   });
-  console.log(`[mock-skill] mock ${mock.url}`);
+  console.log(
+    `[mock-skill] mock ${mock.url} catalogs=${catalogs.join(',')}`,
+  );
 
   let proxy = null;
   if (cfg.proxy.enabled) {
     const casesLoader = () => {
-      const live = loadSession(projectSlug);
+      const live = loadSession();
       return live.cases || { default: 'success', active: {} };
     };
     const allowOpenProxy = Boolean(
@@ -157,7 +233,7 @@ async function startSession(opts = {}) {
     if (cfg.proxy.mitm?.enabled || opts.mitm === true || opts.mitm === '1') {
       try {
         const { createMitmCa } = require('../lib/mitm-ca');
-        const ca = createMitmCa(projectSlug);
+        const ca = createMitmCa(primary);
         mitm = {
           enabled: true,
           getSecureContext: (hostname) => ca.getSecureContext(hostname),
@@ -169,18 +245,28 @@ async function startSession(opts = {}) {
       }
     }
     const statefulLoader = () => {
-      const live = loadSession(projectSlug);
+      const live = loadSession();
       return live.stateful || null;
+    };
+    const trafficLoader = () => {
+      const live = loadSession();
+      return {
+        trafficMode: live.proxy?.trafficMode || 'all-mock',
+        mockAllowlist: live.proxy?.mockAllowlist || [],
+      };
     };
     proxy = await startProxyServer({
       host: proxyHost,
       port: proxyPort,
       mockTarget: mock.url,
-      rules,
+      rules: merged.rules,
       cors: cfg.cors,
       cases: cfg.cases,
       casesLoader,
       statefulLoader,
+      trafficLoader,
+      trafficMode: cfg.proxy.trafficMode || 'all-mock',
+      mockAllowlist: cfg.proxy.mockAllowlist || [],
       caseHeader: cfg.proxy.injectCaseHeader || 'x-mock-case',
       missPolicy: cfg.proxy.missPolicy || 'passthrough',
       blockWritePassthrough: cfg.proxy.blockWritePassthrough !== false,
@@ -190,15 +276,14 @@ async function startSession(opts = {}) {
       allowOpenProxy,
       rejectUnauthorized: cfg.proxy.rejectUnauthorized !== false,
       mitm,
-      capturesDir: path.join(projectDataDir(projectSlug), 'captures'),
+      capturesDir: capturesDirFor(primary),
+      resolveCapturesDir,
       taskId,
-      accessLogPath: path.join(
-        projectDataDir(projectSlug),
-        'audit',
-        'proxy-access.jsonl',
-      ),
+      accessLogPath: path.join(projectDataDir(primary), 'audit', 'proxy-access.jsonl'),
     });
-    console.log(`[mock-skill] proxy ${proxy.url} missPolicy=${proxy.missPolicy}`);
+    console.log(
+      `[mock-skill] proxy ${proxy.url} missPolicy=${proxy.missPolicy} trafficMode=${cfg.proxy.trafficMode || 'all-mock'} allowlist=${(cfg.proxy.mockAllowlist || []).length} rules=${merged.rules.length}`,
+    );
     if (proxyHost === '0.0.0.0') {
       const ip = lanIp();
       const scenarioLabel = cfg.scenario || opts.scenario || '(unset)';
@@ -224,7 +309,7 @@ async function startSession(opts = {}) {
     console.log('[mock-skill] proxy disabled');
   }
 
-  const userDataDir = chromeProfileDir(projectSlug);
+  const userDataDir = chromeProfileDir(primary);
   const chrome = findChrome();
   const clientProxyHost = resolveClientProxyHost(proxyHost);
   const proxyServerArg = `${clientProxyHost}:${proxyPort}`;
@@ -257,7 +342,8 @@ async function startSession(opts = {}) {
   }
 
   const state = {
-    projectSlug,
+    activeCatalogs: catalogs,
+    projectSlug: primary,
     taskId,
     mock: { host: mockHost, port: mockPort, pid: process.pid },
     proxy: cfg.proxy.enabled
@@ -266,16 +352,15 @@ async function startSession(opts = {}) {
     chromePid,
     startedAt: new Date().toISOString(),
   };
-  saveRuntimeState(projectSlug, state);
-  appendAudit(projectSlug, {
+  saveRuntimeState(state);
+  appendAudit(primary, {
     command: 'session start',
     taskId,
-    summary: `mock=${mockPort} proxy=${cfg.proxy.enabled ? proxyPort : 'off'}`,
+    summary: `catalogs=${catalogs.join(',')} mock=${mockPort} proxy=${cfg.proxy.enabled ? proxyPort : 'off'}`,
   });
 
-  // Keep process alive when run as CLI foreground session
   if (opts.detach) {
-    return { mock, proxy, state, chromeCmd };
+    return { mock, proxy, state, chromeCmd, catalogs, rules: merged.rules };
   }
 
   console.log('[mock-skill] session running — Ctrl+C to stop');
@@ -290,14 +375,13 @@ async function startSession(opts = {}) {
     }
     if (proxy) await proxy.close().catch(() => {});
     await mock.close().catch(() => {});
-    saveRuntimeState(projectSlug, { ...state, stoppedAt: new Date().toISOString() });
-    appendAudit(projectSlug, { command: 'session stop', taskId, summary: 'stopped' });
+    saveRuntimeState({ ...state, stoppedAt: new Date().toISOString() });
+    appendAudit(primary, { command: 'session stop', taskId, summary: 'stopped' });
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // idle
   await new Promise(() => {});
 }
 

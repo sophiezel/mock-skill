@@ -3,6 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { resolveClientProxyHost } = require('../scripts/start-session');
 const { loadDefault, deepMerge, loadSession } = require('../lib/session-config');
 const { setScenario } = require('../scripts/set-scenario');
@@ -26,12 +28,24 @@ test('session config: proxy.host=0.0.0.0 is parseable from defaults merge', () =
 
 test('setScenario persists scenario name for session Wi‑Fi block', () => {
   const slug = `proxy-host-test-${Date.now()}`;
-  ensureProjectDirs(slug);
-  copyBuiltinScenarios(slug);
-  setScenario({ name: slug, scenario: 'e2e-fault' });
-  const cfg = loadSession(slug);
-  assert.equal(cfg.scenario, 'e2e-fault');
-  fs.rmSync(projectDataDir(slug), { recursive: true, force: true });
+  const sessionFile = path.join(os.tmpdir(), `${slug}-session.json`);
+  const prev = process.env.MOCK_SKILL_SESSION_FILE;
+  process.env.MOCK_SKILL_SESSION_FILE = sessionFile;
+  try {
+    ensureProjectDirs(slug);
+    copyBuiltinScenarios(slug);
+    setScenario({ name: slug, scenario: 'e2e-fault' });
+    const cfg = loadSession(slug);
+    assert.equal(cfg.scenario, 'e2e-fault');
+  } finally {
+    process.env.MOCK_SKILL_SESSION_FILE = prev;
+    try {
+      fs.unlinkSync(sessionFile);
+    } catch (_) {
+      /* ignore */
+    }
+    fs.rmSync(projectDataDir(slug), { recursive: true, force: true });
+  }
 });
 
 test('applySessionOpts does not mutate base session config', () => {

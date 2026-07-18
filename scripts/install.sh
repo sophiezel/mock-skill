@@ -27,15 +27,20 @@ ln -sfn "$ROOT" "$SKILL_LINK"
 echo "[mock-skill] skill symlink (optional Agent orchestration): $SKILL_LINK -> $ROOT"
 
 echo ""
-echo "[mock-skill] done. Try:"
+echo "[mock-skill] done. Primary track (0 backend dependency):"
 echo "  mock-skill --help"
-echo "  cd <your-frontend-project> && mock-skill init"
-echo "  mock-skill init --strict-usage          # TRACE_EMPTY → non-zero exit"
-echo "  mock-skill capture-merge --name=<slug>  # real capture wins (not auto fill-gap)"
-echo "  mock-skill generate --overwrite-capture # only then may usage overwrite capture"
+echo "  cd <your-frontend-project> && mock-skill init --name=<slug>"
+echo "  mock-skill start --name=<slug>"
+echo "  mock-skill scenario e2e-happy   # or e2e-fault / e2e-slow"
+echo "  mock-skill smoke --ci"
+echo "  mock-skill stop --name=<slug>"
+echo ""
+echo "Optional fidelity upgrade (needs real upstream; not for E2E):"
+echo "  mock-skill start --name=<slug> --record"
+echo "  mock-skill stop --auto-merge --name=<slug>"
 echo ""
 if command -v mock-skill >/dev/null; then
-  mock-skill --help | head -n 24
+  mock-skill --help | head -n 30
 else
   echo "  (mock-skill not on PATH yet — use: node $ROOT/bin/mock-skill.js)"
 fi

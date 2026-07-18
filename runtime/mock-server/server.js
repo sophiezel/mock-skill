@@ -9,8 +9,9 @@ function startMockServer({
   port = 3900,
   cors = {},
   caseHeader = 'x-mock-case',
+  resolveMocksRoot = null,
 }) {
-  const app = createMockApp({ mocksRoot, cors, caseHeader });
+  const app = createMockApp({ mocksRoot, cors, caseHeader, resolveMocksRoot });
   const server = http.createServer(app);
 
   return new Promise((resolve, reject) => {

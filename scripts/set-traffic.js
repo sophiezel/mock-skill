@@ -1,0 +1,128 @@
+'use strict';
+
+/**
+ * Hot-switch proxy trafficMode / mockAllowlist (WireMock-style proxy/intercept).
+ * Session file update; running proxy picks up via trafficLoader ≤1s.
+ */
+
+const { resolveProjectSlug } = require('../lib/paths');
+const { loadSession, saveSession } = require('../lib/session-config');
+const { appendAudit } = require('../lib/audit');
+const {
+  VALID_MODES,
+  normalizeTrafficMode,
+} = require('../lib/traffic-mode');
+const { assertStubId } = require('./set-case');
+
+/**
+ * @param {object} opts
+ * @param {string} [opts.action] - mode | allow | deny | list | clear | set
+ * @param {string} [opts.mode]
+ * @param {string} [opts.stubId]
+ * @param {string} [opts.name]
+ * @param {string} [opts.projectDir]
+ */
+function setTraffic(opts = {}) {
+  const projectSlug = resolveProjectSlug(
+    opts.projectDir || process.cwd(),
+    opts.name,
+  );
+  const action = String(opts.action || '').toLowerCase();
+  const cfg = loadSession(projectSlug);
+  const proxy = { ...(cfg.proxy || {}) };
+  let mode = proxy.trafficMode || 'all-mock';
+  let list = Array.isArray(proxy.mockAllowlist) ? [...proxy.mockAllowlist] : [];
+
+  if (action === 'list' || action === '') {
+    console.log(`[mock-skill] trafficMode=${mode}`);
+    console.log(`[mock-skill] mockAllowlist (${list.length}):`);
+    for (const id of list) console.log(`  - ${id}`);
+    return { trafficMode: mode, mockAllowlist: list };
+  }
+
+  if (action === 'clear') {
+    list = [];
+    saveSession(projectSlug, {
+      proxy: { ...proxy, mockAllowlist: list },
+    });
+    appendAudit(projectSlug, {
+      command: 'traffic',
+      summary: 'clear allowlist',
+    });
+    console.log('[mock-skill] mockAllowlist cleared');
+    console.log('[mock-skill] session picks up via ≤1s cache; no restart needed');
+    return { trafficMode: mode, mockAllowlist: list };
+  }
+
+  if (action === 'allow') {
+    const stubId = opts.stubId;
+    if (!stubId) throw new Error('Usage: mock-skill traffic allow <stubId>');
+    assertStubId(stubId);
+    if (!list.includes(stubId)) list.push(stubId);
+    const patch = { mockAllowlist: list };
+    if (mode !== 'selective') {
+      console.log(
+        `[mock-skill] hint: trafficMode is "${mode}"; allowlist only applies in selective. Run: mock-skill traffic selective`,
+      );
+    }
+    saveSession(projectSlug, { proxy: { ...proxy, ...patch } });
+    appendAudit(projectSlug, {
+      command: 'traffic',
+      apiKey: stubId,
+      summary: 'allow',
+    });
+    console.log(`[mock-skill] allow ${stubId}`);
+    console.log('[mock-skill] session picks up via ≤1s cache; no restart needed');
+    return { trafficMode: mode, mockAllowlist: list };
+  }
+
+  if (action === 'deny') {
+    const stubId = opts.stubId;
+    if (!stubId) throw new Error('Usage: mock-skill traffic deny <stubId>');
+    assertStubId(stubId);
+    list = list.filter((x) => x !== stubId);
+    saveSession(projectSlug, {
+      proxy: { ...proxy, mockAllowlist: list },
+    });
+    appendAudit(projectSlug, {
+      command: 'traffic',
+      apiKey: stubId,
+      summary: 'deny',
+    });
+    console.log(`[mock-skill] deny ${stubId}`);
+    console.log('[mock-skill] session picks up via ≤1s cache; no restart needed');
+    return { trafficMode: mode, mockAllowlist: list };
+  }
+
+  // action is a mode name, or action=set with opts.mode
+  const modeArg = action === 'set' ? opts.mode : action;
+  if (VALID_MODES.has(modeArg) || opts.mode) {
+    mode = normalizeTrafficMode(opts.mode || modeArg);
+    saveSession(projectSlug, {
+      proxy: { ...proxy, trafficMode: mode },
+    });
+    appendAudit(projectSlug, {
+      command: 'traffic',
+      summary: `mode=${mode}`,
+    });
+    console.log(`[mock-skill] trafficMode=${mode}`);
+    console.log('[mock-skill] session picks up via ≤1s cache; no restart needed');
+    return { trafficMode: mode, mockAllowlist: list };
+  }
+
+  throw new Error(
+    `Usage: mock-skill traffic <all-mock|all-passthrough|selective|allow|deny|list|clear> [stubId]`,
+  );
+}
+
+module.exports = { setTraffic };
+
+if (require.main === module) {
+  const a = process.argv[2];
+  const b = process.argv[3];
+  if (a === 'allow' || a === 'deny') {
+    setTraffic({ action: a, stubId: b });
+  } else {
+    setTraffic({ action: a || 'list' });
+  }
+}

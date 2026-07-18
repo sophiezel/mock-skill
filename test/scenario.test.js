@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const {
   projectDataDir,
   ensureProjectDirs,
@@ -13,6 +14,22 @@ const { setScenario } = require('../scripts/set-scenario');
 const { loadSession } = require('../lib/session-config');
 
 const SLUG = 'scenario-test-isolated';
+
+function withIsolatedSession(fn) {
+  const sessionFile = path.join(os.tmpdir(), `${SLUG}-${Date.now()}-session.json`);
+  const prev = process.env.MOCK_SKILL_SESSION_FILE;
+  process.env.MOCK_SKILL_SESSION_FILE = sessionFile;
+  try {
+    return fn();
+  } finally {
+    process.env.MOCK_SKILL_SESSION_FILE = prev;
+    try {
+      fs.unlinkSync(sessionFile);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
 
 function cleanup() {
   fs.rmSync(projectDataDir(SLUG), { recursive: true, force: true });
@@ -39,20 +56,22 @@ test('copyBuiltinScenarios + listScenarios', () => {
 });
 
 test('setScenario applies default + per-api to session cases', () => {
-  cleanup();
-  ensureProjectDirs(SLUG);
-  const dir = projectDataDir(SLUG);
-  const scenDir = path.join(dir, 'scenarios');
-  fs.mkdirSync(scenDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(scenDir, 'custom.json'),
-    JSON.stringify({ default: 'http_502', apis: { 'GET api.example.com/v1/users': 'http_401' } }),
-  );
-  setScenario({ name: SLUG, scenario: 'custom' });
-  const cfg = loadSession(SLUG);
-  assert.equal(cfg.cases.default, 'http_502');
-  assert.equal(cfg.cases.active['GET api.example.com/v1/users'], 'http_401');
-  cleanup();
+  withIsolatedSession(() => {
+    cleanup();
+    ensureProjectDirs(SLUG);
+    const dir = projectDataDir(SLUG);
+    const scenDir = path.join(dir, 'scenarios');
+    fs.mkdirSync(scenDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(scenDir, 'custom.json'),
+      JSON.stringify({ default: 'http_502', apis: { 'GET api.example.com/v1/users': 'http_401' } }),
+    );
+    setScenario({ name: SLUG, scenario: 'custom' });
+    const cfg = loadSession(SLUG);
+    assert.equal(cfg.cases.default, 'http_502');
+    assert.equal(cfg.cases.active['GET api.example.com/v1/users'], 'http_401');
+    cleanup();
+  });
 });
 
 test('setScenario unknown name throws', () => {

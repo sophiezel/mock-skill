@@ -14,6 +14,7 @@ function createMockApp(opts) {
     mocksRoot,
     cors = {},
     caseHeader = 'x-mock-case',
+    resolveMocksRoot = null,
   } = opts;
   const app = express();
 
@@ -28,7 +29,7 @@ function createMockApp(opts) {
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: false, limit: '10mb' }));
 
-  app.use('/', createRouter({ mocksRoot, caseHeader }));
+  app.use('/', createRouter({ mocksRoot, caseHeader, resolveMocksRoot }));
 
   app.use((req, res) => {
     applyCorsHeaders(req, res, cors);

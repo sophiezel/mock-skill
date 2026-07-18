@@ -7,7 +7,16 @@ const path = require('path');
 const net = require('net');
 const tls = require('tls');
 const { applyCorsHeaders, handleOptions } = require('../../lib/cors');
-const { matchRule } = require('../../lib/match-rule');
+const {
+  matchRule,
+  matchPassthroughHost,
+  defaultPortForScheme,
+} = require('../../lib/match-rule');
+const {
+  shouldMock,
+  trafficPassthroughReason,
+  normalizeTrafficMode,
+} = require('../../lib/traffic-mode');
 const { createStatefulEngine } = require('../../lib/stateful');
 
 const DEFAULT_BODY_LIMIT = 10 * 1024 * 1024; // 10mb
@@ -67,6 +76,8 @@ function startProxyServer(opts) {
     recordMisses = true,
     recordMockHits = false,
     capturesDir,
+    /** optional (stubId) => captures dir for that stub's catalog */
+    resolveCapturesDir = null,
     taskId = null,
     accessLogPath,
     allowOpenProxy = false,
@@ -75,12 +86,21 @@ function startProxyServer(opts) {
     rejectUnauthorized = true,
     /** Optional MITM: { enabled, getSecureContext(hostname) -> tls.SecureContext } */
     mitm = null,
+    trafficMode = 'all-mock',
+    mockAllowlist = [],
+    /** optional () => ({ trafficMode, mockAllowlist }) from session */
+    trafficLoader = null,
   } = opts;
 
   let activeRules = rules.length ? rules : loadRules(rulesPath);
   let activeCases = { ...cases };
   let casesCacheAt = 0;
   const CASES_TTL_MS = 1000;
+  let activeTraffic = {
+    trafficMode: normalizeTrafficMode(trafficMode),
+    mockAllowlist: Array.isArray(mockAllowlist) ? [...mockAllowlist] : [],
+  };
+  let trafficCacheAt = 0;
   let statefulEngine = null;
   let statefulFingerprint = '';
 
@@ -136,6 +156,22 @@ function startProxyServer(opts) {
     return activeCases;
   }
 
+  function currentTraffic() {
+    if (!trafficLoader) return activeTraffic;
+    const now = Date.now();
+    if (now - trafficCacheAt > CASES_TTL_MS) {
+      const live = trafficLoader() || {};
+      activeTraffic = {
+        trafficMode: normalizeTrafficMode(live.trafficMode || 'all-mock'),
+        mockAllowlist: Array.isArray(live.mockAllowlist)
+          ? [...live.mockAllowlist]
+          : [],
+      };
+      trafficCacheAt = now;
+    }
+    return activeTraffic;
+  }
+
   const mockUrl = new URL(mockTarget);
 
   function logAccess(entry) {
@@ -152,32 +188,36 @@ function startProxyServer(opts) {
   }
 
   function recordCapture(rec) {
-    if (!capturesDir) return;
+    let dir = capturesDir;
+    if (typeof resolveCapturesDir === 'function' && rec.stubId) {
+      dir = resolveCapturesDir(rec.stubId) || dir;
+    }
+    if (!dir) return;
     if (!recordMisses && rec.reason !== 'mock-hit') return;
     if (rec.reason === 'mock-hit' && !recordMockHits) return;
-    fs.mkdirSync(capturesDir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
     const name = `${Date.now()}-${(rec.host || 'h').replace(/\W/g, '_')}-${rec.path
       .replace(/\W/g, '_')
       .slice(0, 80)}.json`;
     fs.writeFile(
-      path.join(capturesDir, name),
+      path.join(dir, name),
       `${JSON.stringify(rec, null, 2)}\n`,
       () => {},
     );
   }
 
-  function isPassthroughHost(hostname) {
-    return passthroughHosts.some(
-      (h) =>
-        h === hostname ||
-        (h.startsWith('*.') && hostname.endsWith(h.slice(1))),
-    );
+  function isPassthroughHost(hostname, port = null) {
+    return matchPassthroughHost(passthroughHosts, hostname, port);
   }
 
-  function allowConnectTunnel(hostname) {
-    if (isPassthroughHost(hostname)) return true;
+  function allowConnectTunnel(hostname, port = null) {
+    if (isPassthroughHost(hostname, port)) return true;
     if (allowOpenProxy && forcedMissPolicy === 'passthrough') return true;
     return false;
+  }
+
+  function ruleShouldMock(rule) {
+    return shouldMock(rule, currentTraffic());
   }
 
   const server = http.createServer(async (req, res) => {
@@ -197,6 +237,10 @@ function startProxyServer(opts) {
       }
 
       const hostname = target.hostname;
+      const reqPort =
+        target.port && String(target.port)
+          ? Number(target.port)
+          : defaultPortForScheme(target.protocol);
       const urlPath = target.pathname;
       const method = req.method || 'GET';
       let body = Buffer.alloc(0);
@@ -211,7 +255,7 @@ function startProxyServer(opts) {
         return;
       }
 
-      if (isPassthroughHost(hostname)) {
+      if (isPassthroughHost(hostname, reqPort)) {
         const up = await forwardUpstream(req, res, target, body, cors, true);
         logAccess({ action: 'passthrough-host', method, url: target.href });
         recordCapture({
@@ -228,8 +272,9 @@ function startProxyServer(opts) {
       const rule = matchRule(activeRules, hostname, urlPath, method, {
         query: Object.fromEntries(target.searchParams),
         headers: req.headers,
+        port: reqPort,
       });
-      if (rule) {
+      if (rule && ruleShouldMock(rule)) {
         const caseId = resolveCaseId(cs, rule, method, hostname, urlPath);
 
         const headers = { ...req.headers };
@@ -279,6 +324,7 @@ function startProxyServer(opts) {
                   method,
                   reason: 'mock-hit',
                   caseId,
+                  stubId: rule.stubId || rule.id || null,
                   responseBody: bodyJson ?? bodyText,
                 });
               }
@@ -307,6 +353,11 @@ function startProxyServer(opts) {
         return;
       }
 
+      // Matched rule but trafficMode says passthrough (or no rule)
+      const trafficReason = rule
+        ? trafficPassthroughReason(currentTraffic().trafficMode)
+        : 'miss';
+
       const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
       if (isWrite && blockWritePassthrough && forcedMissPolicy !== 'reject') {
         applyCorsHeaders(req, res, cors);
@@ -328,7 +379,9 @@ function startProxyServer(opts) {
         return;
       }
 
-      if (forcedMissPolicy === 'reject') {
+      // missPolicy=reject only blocks true misses (no rule). Traffic-mode
+      // passthrough of a matched rule always forwards (WireMock-style record).
+      if (forcedMissPolicy === 'reject' && !rule) {
         applyCorsHeaders(req, res, cors);
         res.statusCode = 404;
         res.end(JSON.stringify({ code: 404, message: 'no mock rule', data: null }));
@@ -337,13 +390,18 @@ function startProxyServer(opts) {
       }
 
       const up = await forwardUpstream(req, res, target, body, cors, true);
-      logAccess({ action: 'passthrough', method, url: target.href });
+      logAccess({
+        action: rule ? 'traffic-passthrough' : 'passthrough',
+        method,
+        url: target.href,
+      });
       recordCapture({
         host: hostname,
         path: urlPath,
         method,
         query: Object.fromEntries(target.searchParams),
-        reason: 'miss',
+        reason: trafficReason,
+        stubId: rule?.stubId || rule?.id || null,
         responseBody: up?.bodyJson ?? up?.bodyText,
       });
     } catch (err) {
@@ -361,7 +419,11 @@ function startProxyServer(opts) {
     const mitmEnabled = Boolean(mitm?.enabled && typeof mitm.getSecureContext === 'function');
     const ruleHit =
       mitmEnabled &&
-      matchRule(activeRules, hostname, '/', 'GET', { query: {}, headers: {} });
+      matchRule(activeRules, hostname, '/', 'GET', {
+        query: {},
+        headers: {},
+        port: portNum,
+      });
 
     if (mitmEnabled && ruleHit) {
       try {
@@ -401,7 +463,7 @@ function startProxyServer(opts) {
       }
     }
 
-    if (allowConnectTunnel(hostname)) {
+    if (allowConnectTunnel(hostname, portNum)) {
       const upstream = net.connect(portNum, hostname, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head && head.length) upstream.write(head);
@@ -423,7 +485,7 @@ function startProxyServer(opts) {
    * After TLS handshake with client, parse HTTP requests and route to mock/upstream.
    * Simplified: use HTTP parser on the decrypted socket.
    */
-  function handleMitmTlsSocket(tlsSock, hostname, _portNum, _head) {
+  function handleMitmTlsSocket(tlsSock, hostname, portNum, _head) {
     const bridge = http.createServer(async (req, res) => {
       const urlPath = req.url || '/';
       const method = req.method || 'GET';
@@ -442,22 +504,24 @@ function startProxyServer(opts) {
       const pathname = urlPath.split('?')[0];
       const search = urlPath.includes('?') ? urlPath.slice(urlPath.indexOf('?')) : '';
       const query = Object.fromEntries(new URL(`http://${hostname}${urlPath}`).searchParams);
+      const reqPort = Number(portNum) || 443;
       const rule = matchRule(activeRules, hostname, pathname, method, {
         query,
         headers: req.headers,
+        port: reqPort,
       });
 
-      if (!rule) {
-        if (forcedMissPolicy === 'reject' && !allowOpenProxy) {
+      if (!rule || !ruleShouldMock(rule)) {
+        if (!rule && forcedMissPolicy === 'reject' && !allowOpenProxy) {
           res.statusCode = 404;
           res.end(JSON.stringify({ code: 404, message: 'no mock rule (mitm)' }));
           return;
         }
-        // passthrough over real HTTPS
+        // passthrough over real HTTPS (true miss or traffic-mode passthrough)
         const upReq = https.request(
           {
             hostname,
-            port: 443,
+            port: reqPort,
             path: urlPath,
             method,
             headers: { ...req.headers, host: hostname },
@@ -475,6 +539,13 @@ function startProxyServer(opts) {
         });
         if (body.length) upReq.write(body);
         upReq.end();
+        if (rule) {
+          logAccess({
+            action: 'mitm-traffic-passthrough',
+            method,
+            url: `https://${hostname}${urlPath}`,
+          });
+        }
         return;
       }
 
@@ -589,6 +660,7 @@ function startProxyServer(opts) {
         url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${boundPort}`,
         missPolicy: forcedMissPolicy,
         allowOpenProxy,
+        trafficMode: activeTraffic.trafficMode,
         setCases(next) {
           activeCases = { ...activeCases, ...next };
           casesCacheAt = 0;
@@ -598,6 +670,17 @@ function startProxyServer(opts) {
         },
         reloadRules(nextRules) {
           activeRules = nextRules;
+        },
+        setTraffic(next) {
+          activeTraffic = {
+            trafficMode: normalizeTrafficMode(
+              next?.trafficMode || activeTraffic.trafficMode,
+            ),
+            mockAllowlist: Array.isArray(next?.mockAllowlist)
+              ? [...next.mockAllowlist]
+              : [...activeTraffic.mockAllowlist],
+          };
+          trafficCacheAt = 0;
         },
         close: () =>
           new Promise((res, rej) => server.close((e) => (e ? rej(e) : res()))),

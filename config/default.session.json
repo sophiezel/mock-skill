@@ -7,7 +7,9 @@
     "blockWritePassthrough": true,
     "injectCaseHeader": "x-mock-case",
     "recordMisses": true,
-    "passthroughHosts": []
+    "passthroughHosts": [],
+    "trafficMode": "all-mock",
+    "mockAllowlist": []
   },
   "mock": {
     "enabled": true,
@@ -29,5 +31,7 @@
     "default": "success",
     "active": {}
   },
+  "activeCatalogs": [],
+  "activeRules": [],
   "captureMode": "soft"
 }
